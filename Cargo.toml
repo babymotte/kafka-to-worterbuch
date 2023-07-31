@@ -1,0 +1,15 @@
+[package]
+name = "kafka-to-worterbuch"
+version = "0.1.0"
+edition = "2021"
+description = "Dump kafka topics into a Wörterbuch"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+miette = { version = "5.10.0", features = ["fancy"] }
+env_logger = "0.10.0"
+log = "0.4.19"
+tokio = { version = "1.29.1", features = ["rt"] }
+tokio-graceful-shutdown = "0.13.0"
+clap = { version = "4.3.19", features = ["derive"] }
