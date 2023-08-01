@@ -13,7 +13,7 @@ use rdkafka::{
 };
 use regex::Regex;
 use serde_json::json;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::{select, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
 use worterbuch_client::{topic, Connection, KeyValuePair};
@@ -26,27 +26,88 @@ struct KafkaToWorterbuch {
     topic_regex: Regex,
 }
 
-pub struct K2WbContext {}
+pub struct K2WbContext {
+    subsys: SubsystemHandle,
+}
 
 impl ClientContext for K2WbContext {}
 
 impl K2WbContext {
-    pub fn new() -> Self {
-        K2WbContext {}
+    pub fn new(subsys: SubsystemHandle) -> Self {
+        K2WbContext { subsys }
     }
 }
 
 impl ConsumerContext for K2WbContext {
-    fn pre_rebalance(&self, _rebalance: &Rebalance) {
-        log::info!("Starting rebalance …");
+    fn pre_rebalance(&self, rebalance: &Rebalance) {
+        match rebalance {
+            Rebalance::Assign(ass) => {
+                log::info!(
+                    "Starting rebalance; assigned: {:?}",
+                    ass.to_topic_map()
+                        .keys()
+                        .map(|(topic, part)| format!("{topic}-{part}"))
+                        .collect::<Vec<String>>()
+                )
+            }
+            Rebalance::Revoke(rev) => {
+                log::info!(
+                    "Starting rebalance; assignment revoked: {:?}",
+                    rev.to_topic_map()
+                        .keys()
+                        .map(|(topic, part)| format!("{topic}-{part}"))
+                        .collect::<Vec<String>>()
+                )
+            }
+            Rebalance::Error(err) => {
+                log::error!("Rebalance error: {err}");
+                self.subsys.request_global_shutdown();
+            }
+        }
     }
 
-    fn post_rebalance(&self, _rebalance: &Rebalance) {
-        log::info!("Rebalance complete.");
+    fn post_rebalance(&self, rebalance: &Rebalance) {
+        match rebalance {
+            Rebalance::Assign(ass) => {
+                log::info!(
+                    "Rebalance complete; assigned: {:?}",
+                    ass.to_topic_map()
+                        .keys()
+                        .map(|(topic, part)| format!("{topic}-{part}"))
+                        .collect::<Vec<String>>()
+                )
+            }
+            Rebalance::Revoke(rev) => {
+                log::info!(
+                    "Rebalance complete; assignment revoked: {:?}",
+                    rev.to_topic_map()
+                        .keys()
+                        .map(|(topic, part)| format!("{topic}-{part}"))
+                        .collect::<Vec<String>>()
+                )
+            }
+            Rebalance::Error(err) => {
+                log::error!("Rebalance error: {err}");
+                self.subsys.request_global_shutdown();
+            }
+        }
     }
 
-    fn commit_callback(&self, result: KafkaResult<()>, _offsets: &TopicPartitionList) {
-        log::debug!("Committing offsets: {:?}", result);
+    fn commit_callback(&self, result: KafkaResult<()>, offsets: &TopicPartitionList) {
+        match result {
+            Ok(_) => log::debug!(
+                "Offsets committed: {:?}",
+                offsets
+                    .to_topic_map()
+                    .keys()
+                    .map(|(topic, part)| format!("{topic}-{part}"))
+                    .collect::<Vec<String>>()
+            ),
+            Err(e) => {
+                log::error!("Error committing offsets: {e}");
+                self.subsys.request_global_shutdown();
+            }
+        }
     }
 }
 
@@ -57,7 +118,7 @@ impl KafkaToWorterbuch {
         let group_id = format!("kafka-to-worterbuch-{}", self.application);
         let bootstrap_servers = self.manifest.bootstrap_servers.join(",");
 
-        let context = K2WbContext::new();
+        let context = K2WbContext::new(self.subsys.clone());
 
         let consumer: K2WbConsumer = ClientConfig::new()
             .set("group.id", group_id)
@@ -81,7 +142,10 @@ impl KafkaToWorterbuch {
 
         log::info!("Subscription done. Waiting for rebalance …");
 
+        let mut last_commit = Instant::now();
         let mut msg_received = false;
+
+        let transcoder = transcoder::transcoder_for(&self.manifest);
 
         loop {
             select! {
@@ -89,13 +153,19 @@ impl KafkaToWorterbuch {
                     Ok(msg) => {
                         msg_received = true;
                         consumer.store_offset_from_message(&msg).into_diagnostic()?;
-                        self.process_kafka_message(msg).await?;
+                        self.process_kafka_message(msg, &transcoder).await?;
+                        if last_commit.elapsed().as_secs() >= 5 {
+                            self.commit_offsets(&consumer)?;
+                            last_commit = Instant::now();
+                            msg_received = false;
+                        }
                     },
                     Err(e) => return Err(e).into_diagnostic(),
                 },
                 _ = sleep(Duration::from_secs(5)) => {
                     if msg_received {
                         self.commit_offsets(&consumer)?;
+                        last_commit = Instant::now();
                         msg_received = false;
                     }
                 },
@@ -106,8 +176,12 @@ impl KafkaToWorterbuch {
         Ok(())
     }
 
-    async fn process_kafka_message(&mut self, message: BorrowedMessage<'_>) -> Result<()> {
-        match transcoder::transcoder_for(&self.manifest.encoding).transcode(&message) {
+    async fn process_kafka_message(
+        &mut self,
+        message: BorrowedMessage<'_>,
+        transcoder: &impl Transcoder,
+    ) -> Result<()> {
+        match transcoder.transcode(&message).await {
             Ok(value) => {
                 let key = message
                     .key()
