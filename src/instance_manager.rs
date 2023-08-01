@@ -20,7 +20,7 @@ pub enum Encoding {
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationManifest {
     pub bootstrap_servers: Vec<String>,
-    pub schema_registry: Url,
+    pub schema_registry: Option<Url>,
     pub topics: Vec<String>,
     pub disabled: Option<bool>,
     #[serde(default = "default_encoding")]

@@ -145,7 +145,7 @@ impl KafkaToWorterbuch {
         let mut last_commit = Instant::now();
         let mut msg_received = false;
 
-        let transcoder = transcoder::transcoder_for(&self.manifest);
+        let transcoder = transcoder::transcoder_for(&self.manifest)?;
 
         loop {
             select! {

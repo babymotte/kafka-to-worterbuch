@@ -37,13 +37,13 @@ impl<'a> Transcoder for TranscoderImpl<'a> {
     }
 }
 
-pub fn transcoder_for(manifest: &ApplicationManifest) -> impl Transcoder {
+pub fn transcoder_for(manifest: &ApplicationManifest) -> Result<impl Transcoder> {
     match manifest.encoding {
-        Encoding::Avro => TranscoderImpl::Avro(AvroTranscoder::with_schema_registry(
+        Encoding::Avro => Ok(TranscoderImpl::Avro(AvroTranscoder::with_schema_registry(
             &manifest.schema_registry,
-        )),
-        Encoding::Json => TranscoderImpl::Json(JsonTranscoder::default()),
-        Encoding::Protobuf => TranscoderImpl::Protobuf(ProtobufTranscoder::default()),
-        Encoding::PlainText => TranscoderImpl::PlainText(PlainTextTranscoder::default()),
+        )?)),
+        Encoding::Json => Ok(TranscoderImpl::Json(JsonTranscoder::default())),
+        Encoding::Protobuf => Ok(TranscoderImpl::Protobuf(ProtobufTranscoder::default())),
+        Encoding::PlainText => Ok(TranscoderImpl::PlainText(PlainTextTranscoder::default())),
     }
 }
