@@ -1,4 +1,5 @@
 mod command_line;
+mod filter;
 mod instance_manager;
 mod kafka_to_worterbuch;
 mod transcoder;

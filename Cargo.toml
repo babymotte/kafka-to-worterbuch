@@ -18,10 +18,11 @@ worterbuch-client = "0.36.0"
 serde_json = "1.0.104"
 url = { version = "2.4.0", features = ["serde"] }
 serde = { version = "1.0.180", features = ["derive"] }
-regex = "1.9.1"
+# regex = "1.9.1"
 apache-avro = "0.15.0"
 schema_registry_converter = { version = "3.1.0", default-features = false, features = [
     "futures",
     "avro",
 ] }
 async-trait = "0.1.72"
+serde_json_path = "0.6.2"
