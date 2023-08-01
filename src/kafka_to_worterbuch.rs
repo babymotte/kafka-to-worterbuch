@@ -16,8 +16,7 @@ use serde_json::json;
 use std::time::Duration;
 use tokio::{select, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
-use worterbuch_client::{topic, Connection};
-use worterbuch_common::KeyValuePair;
+use worterbuch_client::{topic, Connection, KeyValuePair};
 
 struct KafkaToWorterbuch {
     wb: Connection,

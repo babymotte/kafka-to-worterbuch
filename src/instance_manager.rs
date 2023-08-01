@@ -6,8 +6,7 @@ use std::collections::HashMap;
 use tokio::select;
 use tokio_graceful_shutdown::{NestedSubsystem, SubsystemHandle};
 use url::Url;
-use worterbuch_client::{topic, ServerMessage};
-use worterbuch_common::{KeyValuePair, KeyValuePairs, PStateEvent};
+use worterbuch_client::{topic, KeyValuePair, PStateEvent, ServerMessage};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Encoding {
@@ -110,7 +109,7 @@ impl InstanceManager {
         Ok(())
     }
 
-    async fn spawn_or_update_instances(&mut self, kvps: KeyValuePairs) -> Result<()> {
+    async fn spawn_or_update_instances(&mut self, kvps: Vec<KeyValuePair>) -> Result<()> {
         for KeyValuePair { key, value } in kvps {
             if let Ok(manifest) = serde_json::from_value::<ApplicationManifest>(value) {
                 if let Some(true) = manifest.disabled {
@@ -128,7 +127,7 @@ impl InstanceManager {
         Ok(())
     }
 
-    async fn stop_instances(&mut self, kvps: KeyValuePairs) -> Result<()> {
+    async fn stop_instances(&mut self, kvps: Vec<KeyValuePair>) -> Result<()> {
         for KeyValuePair { key, value: _ } in kvps {
             self.stop_instance(&key).await?;
         }
