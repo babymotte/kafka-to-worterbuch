@@ -17,11 +17,52 @@ pub enum Encoding {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", untagged)]
+pub enum Topic {
+    Plain(String),
+    Action(TopicWithAction),
+    Filter(TopicFilter),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicWithAction {
+    name: String,
+    pub action: TopicAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", untagged)]
+pub enum TopicAction {
+    Set,
+    Publish,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicFilter {
+    name: String,
+    pub set: Option<String>,
+    pub publish: Option<String>,
+    pub delete: Option<String>,
+}
+
+impl Topic {
+    pub fn name(&self) -> &str {
+        match self {
+            Topic::Plain(n) => &n,
+            Topic::Action(a) => &a.name,
+            Topic::Filter(f) => &f.name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationManifest {
     pub bootstrap_servers: Vec<String>,
-    pub schema_registry: Url,
-    pub topics: Vec<String>,
+    pub schema_registry: Option<Url>,
+    pub topics: Vec<Topic>,
     pub disabled: Option<bool>,
     #[serde(default = "default_encoding")]
     pub encoding: Encoding,

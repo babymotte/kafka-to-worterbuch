@@ -2,7 +2,8 @@ use self::{
     avro::AvroTranscoder, json::JsonTranscoder, plaintext::PlainTextTranscoder,
     protobuf::ProtobufTranscoder,
 };
-use crate::instance_manager::Encoding;
+use crate::instance_manager::{ApplicationManifest, Encoding};
+use async_trait::async_trait;
 use miette::Result;
 use rdkafka::message::BorrowedMessage;
 use serde_json::Value;
@@ -12,33 +13,37 @@ mod json;
 mod plaintext;
 mod protobuf;
 
+#[async_trait]
 pub trait Transcoder {
-    fn transcode(&self, message: &BorrowedMessage<'_>) -> Result<Value>;
+    async fn transcode(&self, message: &BorrowedMessage<'_>) -> Result<Value>;
 }
 
-pub enum TranscoderImpl {
-    Avro(AvroTranscoder),
+pub enum TranscoderImpl<'a> {
+    Avro(AvroTranscoder<'a>),
     Json(JsonTranscoder),
     Protobuf(ProtobufTranscoder),
     PlainText(PlainTextTranscoder),
 }
 
-impl Transcoder for TranscoderImpl {
-    fn transcode(&self, message: &BorrowedMessage<'_>) -> Result<Value> {
+#[async_trait]
+impl<'a> Transcoder for TranscoderImpl<'a> {
+    async fn transcode(&self, message: &BorrowedMessage<'_>) -> Result<Value> {
         match self {
-            TranscoderImpl::Avro(transcoder) => transcoder.transcode(message),
-            TranscoderImpl::Json(transcoder) => transcoder.transcode(message),
-            TranscoderImpl::Protobuf(transcoder) => transcoder.transcode(message),
-            TranscoderImpl::PlainText(transcoder) => transcoder.transcode(message),
+            TranscoderImpl::Avro(transcoder) => transcoder.transcode(message).await,
+            TranscoderImpl::Json(transcoder) => transcoder.transcode(message).await,
+            TranscoderImpl::Protobuf(transcoder) => transcoder.transcode(message).await,
+            TranscoderImpl::PlainText(transcoder) => transcoder.transcode(message).await,
         }
     }
 }
 
-pub fn transcoder_for(encoding: &Encoding) -> impl Transcoder {
-    match encoding {
-        Encoding::Avro => TranscoderImpl::Avro(AvroTranscoder::default()),
-        Encoding::Json => TranscoderImpl::Json(JsonTranscoder::default()),
-        Encoding::Protobuf => TranscoderImpl::Protobuf(ProtobufTranscoder::default()),
-        Encoding::PlainText => TranscoderImpl::PlainText(PlainTextTranscoder::default()),
+pub fn transcoder_for(manifest: &ApplicationManifest) -> Result<impl Transcoder> {
+    match manifest.encoding {
+        Encoding::Avro => Ok(TranscoderImpl::Avro(AvroTranscoder::with_schema_registry(
+            &manifest.schema_registry,
+        )?)),
+        Encoding::Json => Ok(TranscoderImpl::Json(JsonTranscoder::default())),
+        Encoding::Protobuf => Ok(TranscoderImpl::Protobuf(ProtobufTranscoder::default())),
+        Encoding::PlainText => Ok(TranscoderImpl::PlainText(PlainTextTranscoder::default())),
     }
 }
