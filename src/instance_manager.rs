@@ -111,17 +111,21 @@ impl InstanceManager {
 
     async fn spawn_or_update_instances(&mut self, kvps: Vec<KeyValuePair>) -> Result<()> {
         for KeyValuePair { key, value } in kvps {
-            if let Ok(manifest) = serde_json::from_value::<ApplicationManifest>(value) {
-                if let Some(true) = manifest.disabled {
-                    self.stop_instance(&key).await?;
-                } else {
-                    if self.instances.contains_key(&key) {
+            match serde_json::from_value::<ApplicationManifest>(value) {
+                Ok(manifest) => {
+                    if let Some(true) = manifest.disabled {
                         self.stop_instance(&key).await?;
+                    } else {
+                        if self.instances.contains_key(&key) {
+                            self.stop_instance(&key).await?;
+                        }
+                        self.spawn_instance(key, manifest).await?;
                     }
-                    self.spawn_instance(key, manifest).await?;
                 }
-            } else {
-                self.stop_instance(&key).await?;
+                Err(e) => {
+                    log::warn!("could not parse application manifest for '{}': {}", key, e);
+                    self.stop_instance(&key).await?;
+                }
             }
         }
         Ok(())
