@@ -1,3 +1,4 @@
+mod client;
 mod command_line;
 mod filter;
 mod instance_manager;

@@ -98,7 +98,7 @@ impl InstanceManager {
 
         wb.set(last_will_topic, &true).into_diagnostic()?;
 
-        wb.psubscribe_unique_async(topic!(ROOT_KEY, "applications", "?"))
+        wb.psubscribe_unique_async(topic!(ROOT_KEY, "applications", "?", "manifest"))
             .into_diagnostic()?;
 
         let mut messages = wb.responses();
