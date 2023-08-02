@@ -64,10 +64,7 @@ impl KafkaToWorterbuch {
                     Ok(msg) => self.process_kafka_message(msg, &transcoder).await?,
                     Err(e) => return Err(e).into_diagnostic(),
                 },
-                assignment = rebalance_rx.recv() => match assignment {
-                    Some(assignment) => self.seek_to_stored_offsets(assignment, &consumer).await?,
-                    None => break,
-                },
+                _ = rebalance_rx.recv() => self.seek_to_stored_offsets(&consumer).await?,
                 _ = self.subsys.on_shutdown_requested() => break,
             }
         }
@@ -116,39 +113,31 @@ impl KafkaToWorterbuch {
         Ok(())
     }
 
-    async fn seek_to_stored_offsets(
-        &mut self,
-        assignment: Vec<(String, i32)>,
-        consumer: &K2WbConsumer,
-    ) -> Result<()> {
-        log::info!("Rebalance complete; assigned: {:?}", assignment);
-
+    async fn seek_to_stored_offsets(&mut self, consumer: &K2WbConsumer) -> Result<()> {
         log::info!("Seeking to stored offsets …");
 
-        for (topic, partition) in assignment {
-            self.seek_to_stored_offset(topic, partition, consumer)
-                .await?;
+        let mut assignment = consumer.assignment().into_diagnostic()?;
+        let assigned_partitions: Vec<(String, i32)> = assignment
+            .clone()
+            .elements()
+            .into_iter()
+            .map(|e| (e.topic().to_owned(), e.partition()))
+            .collect();
+
+        for (topic, partition) in assigned_partitions {
+            let offset = self.fetch_stored_offset(&topic, partition).await;
+            assignment
+                .set_partition_offset(&topic, partition, offset)
+                .into_diagnostic()?;
         }
+        consumer.seek_partitions(assignment, TO).into_diagnostic()?;
 
         log::info!("Done. Ready to forward messages.");
 
         Ok(())
     }
 
-    async fn seek_to_stored_offset(
-        &mut self,
-        topic: String,
-        partition: i32,
-        consumer: &K2WbConsumer,
-    ) -> Result<()> {
-        let offset = self.fetch_stored_offset(&topic, partition).await;
-        consumer
-            .seek(&topic, partition, offset, TO)
-            .into_diagnostic()?;
-        Ok(())
-    }
-
-    async fn fetch_stored_offset(&mut self, topic: &String, partition: i32) -> Offset {
+    async fn fetch_stored_offset(&mut self, topic: &str, partition: i32) -> Offset {
         self.wb
             .get::<i64>(topic!(self.offsets_key, topic, partition))
             .await
