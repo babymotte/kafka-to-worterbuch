@@ -1,4 +1,7 @@
-use crate::{kafka_to_worterbuch, ROOT_KEY};
+use crate::{
+    filter::{FilterType, TopicFilter},
+    kafka_to_worterbuch, ROOT_KEY,
+};
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -20,39 +23,26 @@ pub enum Encoding {
 #[serde(rename_all = "camelCase", untagged)]
 pub enum Topic {
     Plain(String),
-    Action(TopicWithAction),
     Filter(TopicFilter),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TopicWithAction {
-    name: String,
-    pub action: TopicAction,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", untagged)]
-pub enum TopicAction {
-    Set,
-    Publish,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TopicFilter {
-    name: String,
-    pub set: Option<String>,
-    pub publish: Option<String>,
-    pub delete: Option<String>,
 }
 
 impl Topic {
     pub fn name(&self) -> &str {
         match self {
             Topic::Plain(n) => &n,
-            Topic::Action(a) => &a.name,
             Topic::Filter(f) => &f.name,
+        }
+    }
+
+    pub fn filter(&self) -> TopicFilter {
+        match self {
+            Topic::Plain(name) => TopicFilter {
+                name: name.clone(),
+                set: Some(FilterType::Unconditional(true)),
+                publish: None,
+                delete: None,
+            },
+            Topic::Filter(it) => it.clone(),
         }
     }
 }

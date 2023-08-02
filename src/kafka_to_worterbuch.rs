@@ -1,6 +1,6 @@
 use crate::{
-    filter,
-    instance_manager::{ApplicationManifest, Topic, TopicAction},
+    filter::{Action, TopicFilter},
+    instance_manager::{ApplicationManifest, Topic},
     transcoder::{self, Transcoder},
     ROOT_KEY,
 };
@@ -13,7 +13,7 @@ use rdkafka::{
     ClientConfig, ClientContext, Message, TopicPartitionList,
 };
 // use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -21,102 +21,6 @@ use std::{
 use tokio::{select, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
 use worterbuch_client::{topic, Connection, KeyValuePair};
-
-struct TopicFilter {
-    set: Option<Filter>,
-    publish: Option<Filter>,
-    delete: Option<Filter>,
-}
-
-impl TopicFilter {
-    fn always_set() -> Self {
-        TopicFilter {
-            set: Some(Filter::Always),
-            publish: None,
-            delete: None,
-        }
-    }
-
-    fn always_publish() -> Self {
-        TopicFilter {
-            set: None,
-            publish: Some(Filter::Always),
-            delete: None,
-        }
-    }
-
-    fn filter(
-        set: &mut Option<String>,
-        publish: &mut Option<String>,
-        delete: &mut Option<String>,
-    ) -> Self {
-        TopicFilter {
-            set: set.take().map(|f| Filter::Match(f)),
-            publish: publish.take().map(|f| Filter::Match(f)),
-            delete: delete.take().map(|f| Filter::Match(f)),
-        }
-    }
-}
-
-enum Filter {
-    Always,
-    Match(String),
-}
-
-enum Action {
-    Set,
-    Publish,
-    Delete,
-}
-
-impl TopicFilter {
-    fn apply(&self, message: &Value) -> Option<Action> {
-        let mut set_defined = false;
-        let mut publish_defined = false;
-        let mut delete_defined = false;
-        if let Some(filter) = &self.set {
-            match filter {
-                Filter::Always => return Some(Action::Set),
-                Filter::Match(expr) => {
-                    if filter::matches(message.clone(), expr) {
-                        return Some(Action::Set);
-                    }
-                    set_defined = true;
-                }
-            }
-        }
-
-        if let Some(filter) = &self.publish {
-            match filter {
-                Filter::Always => return Some(Action::Publish),
-                Filter::Match(expr) => {
-                    if filter::matches(message.clone(), expr) {
-                        return Some(Action::Publish);
-                    }
-                    publish_defined = true;
-                }
-            }
-        }
-
-        if let Some(filter) = &self.delete {
-            match filter {
-                Filter::Always => panic!("delete can only be conditional"),
-                Filter::Match(expr) => {
-                    if filter::matches(message.clone(), expr) {
-                        return Some(Action::Delete);
-                    }
-                    delete_defined = true;
-                }
-            }
-        }
-
-        if set_defined && publish_defined && delete_defined {
-            None
-        } else {
-            Some(Action::Set)
-        }
-    }
-}
 
 struct KafkaToWorterbuch {
     wb: Connection,
@@ -392,24 +296,9 @@ fn build_topic_filters(manifest: &mut ApplicationManifest) -> HashMap<String, To
 
     for topic in manifest.topics.iter_mut() {
         let topic_name = topic.name().to_owned();
-        let topic_filter = build_topic_filter(topic);
+        let topic_filter = topic.filter();
         map.insert(topic_name, topic_filter);
     }
 
     map
-}
-
-fn build_topic_filter(topic: &mut Topic) -> TopicFilter {
-    match topic {
-        Topic::Plain(_) => TopicFilter {
-            set: Some(Filter::Always),
-            publish: None,
-            delete: None,
-        },
-        Topic::Action(a) => match a.action {
-            TopicAction::Set => TopicFilter::always_set(),
-            TopicAction::Publish => TopicFilter::always_publish(),
-        },
-        Topic::Filter(f) => TopicFilter::filter(&mut f.set, &mut f.publish, &mut f.delete),
-    }
 }
