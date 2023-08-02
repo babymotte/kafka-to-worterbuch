@@ -5,26 +5,24 @@ use crate::{
     transcoder::{self, Transcoder},
     ROOT_KEY,
 };
-use log::info;
 use miette::{IntoDiagnostic, Result};
 use rdkafka::{
     config::RDKafkaLogLevel, consumer::Consumer, message::BorrowedMessage, ClientConfig, Message,
     Offset,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{collections::HashMap, time::Duration};
 use tokio::{select, sync::mpsc};
 use tokio_graceful_shutdown::SubsystemHandle;
 use worterbuch_client::{topic, Connection, KeyValuePair};
 
-// use regex::Regex;
+const TO: Duration = Duration::from_secs(5);
 
 struct KafkaToWorterbuch {
     wb: Connection,
     subsys: SubsystemHandle,
     manifest: ApplicationManifest,
     application: String,
-    // topic_regex: Regex,
     topic_filters: HashMap<String, TopicFilter>,
     offsets_key: String,
 }
@@ -55,7 +53,6 @@ impl KafkaToWorterbuch {
         let topics: Vec<&str> = self.manifest.topics.iter().map(Topic::name).collect();
 
         log::info!("Subscribing to topics: {topics:?} …");
-
         consumer.subscribe(&topics).into_diagnostic()?;
         log::info!("Subscription done. Waiting for rebalance …");
 
@@ -83,50 +80,39 @@ impl KafkaToWorterbuch {
         message: BorrowedMessage<'_>,
         transcoder: &impl Transcoder,
     ) -> Result<()> {
-        log::info!(
-            "processing message {}-{}-{}: {}",
-            message.topic(),
-            message.partition(),
-            message.offset(),
-            String::from_utf8_lossy(message.payload().unwrap())
-        );
         match transcoder.transcode(&message).await {
-            Ok(value) => {
-                let key = message
-                    .key()
-                    .map(String::from_utf8_lossy)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "<no_key>".to_owned());
-                let topic = message.topic().to_owned();
-
-                let topic_filter = self.topic_filters.get(&topic);
-
-                // if !self.topic_regex.is_match(&topic) {
-                //     topic = format!("{topic}_v1");
-                // }
-                let key = topic!(self.application, topic, key);
-
-                match topic_filter.and_then(|f| f.apply(&value)) {
-                    Some(Action::Delete) => {
-                        self.wb.delete_async(key).into_diagnostic()?;
-                    }
-                    Some(Action::Publish) => {
-                        self.wb.publish(key, &value).into_diagnostic()?;
-                    }
-                    _ => {
-                        self.wb.set(key, &value).into_diagnostic()?;
-                    }
-                }
-                self.wb
-                    .set(
-                        topic!(self.offsets_key, message.topic(), message.partition()),
-                        &message.offset(),
-                    )
-                    .into_diagnostic()?;
-            }
+            Ok(value) => self.forward_transcoded_message(message, value)?,
             Err(e) => log::error!("Error decoding kafka message: {e}"),
         }
 
+        Ok(())
+    }
+
+    fn forward_transcoded_message(
+        &mut self,
+        message: BorrowedMessage<'_>,
+        value: Value,
+    ) -> Result<()> {
+        let msg_key = decode_key(&message);
+        let topic = message.topic();
+        let topic_filter = self.topic_filters.get(topic);
+
+        let key = topic!(self.application, topic, msg_key);
+        match topic_filter.and_then(|f| f.apply(&value)) {
+            Some(Action::Delete) => self.wb.delete_async(key),
+            Some(Action::Publish) => self.wb.publish(key, &value),
+            _ => self.wb.set(key, &value),
+        }
+        .into_diagnostic()?;
+
+        self.store_offset(message)?;
+
+        Ok(())
+    }
+
+    fn store_offset(&mut self, message: BorrowedMessage<'_>) -> Result<()> {
+        let key = topic!(self.offsets_key, message.topic(), message.partition());
+        self.wb.set(key, &message.offset()).into_diagnostic()?;
         Ok(())
     }
 
@@ -135,23 +121,49 @@ impl KafkaToWorterbuch {
         assignment: Vec<(String, i32)>,
         consumer: &K2WbConsumer,
     ) -> Result<()> {
-        info!("Seeking to stored offsets …");
+        log::info!("Rebalance complete; assigned: {:?}", assignment);
+
+        log::info!("Seeking to stored offsets …");
+
         for (topic, partition) in assignment {
-            let offset = self
-                .wb
-                .get::<i64>(topic!(self.offsets_key, topic, partition))
-                .await
-                .ok()
-                .map(|o| Offset::Offset(o + 1))
-                .unwrap_or(Offset::Beginning);
-            consumer
-                .seek(&topic, partition, offset, Duration::from_secs(5))
-                .into_diagnostic()?;
+            self.seek_to_stored_offset(topic, partition, consumer)
+                .await?;
         }
+
         log::info!("Done. Ready to forward messages.");
 
         Ok(())
     }
+
+    async fn seek_to_stored_offset(
+        &mut self,
+        topic: String,
+        partition: i32,
+        consumer: &K2WbConsumer,
+    ) -> Result<()> {
+        let offset = self.fetch_stored_offset(&topic, partition).await;
+        consumer
+            .seek(&topic, partition, offset, TO)
+            .into_diagnostic()?;
+        Ok(())
+    }
+
+    async fn fetch_stored_offset(&mut self, topic: &String, partition: i32) -> Offset {
+        self.wb
+            .get::<i64>(topic!(self.offsets_key, topic, partition))
+            .await
+            .ok()
+            .map(|o| Offset::Offset(o + 1))
+            .unwrap_or(Offset::Beginning)
+    }
+}
+
+fn decode_key(message: &BorrowedMessage<'_>) -> String {
+    message
+        .key()
+        .map(String::from_utf8_lossy)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "<no_key>".to_owned())
 }
 
 pub async fn run(
@@ -198,11 +210,7 @@ pub async fn run(
     wb.set(last_will_topic, &true).into_diagnostic()?;
 
     let stopped_application = application.clone();
-
-    // let topic_regex: Regex = Regex::new(r"(_v[0-9]+)$").into_diagnostic()?;
-
     let topic_filters = build_topic_filters(&mut manifest);
-
     let offsets_key = topic!(ROOT_KEY, "applications", application, "offsets");
 
     KafkaToWorterbuch {
@@ -210,7 +218,6 @@ pub async fn run(
         subsys,
         wb,
         application,
-        // topic_regex,
         topic_filters,
         offsets_key,
     }

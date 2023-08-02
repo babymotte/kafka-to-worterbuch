@@ -32,18 +32,16 @@ impl ConsumerContext for K2WbContext {
                 log::info!(
                     "Starting rebalance; assigned: {:?}",
                     ass.to_topic_map()
-                        .keys()
-                        .map(|(topic, part)| format!("{topic}-{part}"))
-                        .collect::<Vec<String>>()
+                        .into_keys()
+                        .collect::<Vec<(String, i32)>>()
                 )
             }
             Rebalance::Revoke(rev) => {
                 log::info!(
                     "Starting rebalance; assignment revoked: {:?}",
                     rev.to_topic_map()
-                        .keys()
-                        .map(|(topic, part)| format!("{topic}-{part}"))
-                        .collect::<Vec<String>>()
+                        .into_keys()
+                        .collect::<Vec<(String, i32)>>()
                 )
             }
             Rebalance::Error(err) => {
@@ -56,13 +54,6 @@ impl ConsumerContext for K2WbContext {
     fn post_rebalance(&self, rebalance: &Rebalance) {
         match rebalance {
             Rebalance::Assign(ass) => {
-                log::info!(
-                    "Rebalance complete; assigned: {:?}",
-                    ass.to_topic_map()
-                        .keys()
-                        .map(|(topic, part)| format!("{topic}-{part}"))
-                        .collect::<Vec<String>>()
-                );
                 let partitions = ass.to_topic_map().into_keys().collect();
                 if let Err(e) = self.rebalance_tx.send(partitions) {
                     log::error!("Could not notify client of assigned partitions: {e}");
@@ -73,9 +64,8 @@ impl ConsumerContext for K2WbContext {
                 log::info!(
                     "Rebalance complete; assignment revoked: {:?}",
                     rev.to_topic_map()
-                        .keys()
-                        .map(|(topic, part)| format!("{topic}-{part}"))
-                        .collect::<Vec<String>>()
+                        .into_keys()
+                        .collect::<Vec<(String, i32)>>()
                 )
             }
             Rebalance::Error(err) => {
