@@ -21,6 +21,10 @@ pub struct Options {
     /// Worterbuch server port. Default is '8080'
     #[arg(short, long)]
     pub port: Option<u16>,
+
+    /// Name of the application this instance synchronizes to worterbuch
+    #[arg(index = 1)]
+    pub application: String,
 }
 
 pub fn parse() -> Options {

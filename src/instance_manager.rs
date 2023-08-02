@@ -4,12 +4,11 @@ use crate::{
 };
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::HashMap;
 use tokio::select;
 use tokio_graceful_shutdown::{NestedSubsystem, SubsystemHandle};
 use url::Url;
-use worterbuch_client::{topic, KeyValuePair, PStateEvent, ServerMessage};
+use worterbuch_client::{topic, KeyValuePair, ServerMessage, StateEvent};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Encoding {
@@ -63,6 +62,7 @@ fn default_encoding() -> Encoding {
 }
 
 struct InstanceManager {
+    application: String,
     instances: HashMap<String, NestedSubsystem>,
     subsys: SubsystemHandle,
     proto: String,
@@ -72,12 +72,7 @@ struct InstanceManager {
 
 impl InstanceManager {
     async fn run(mut self) -> Result<()> {
-        let last_will_topic = topic!(ROOT_KEY, "status", "running", "instance_manager");
-
-        let last_will = vec![KeyValuePair {
-            key: last_will_topic.clone(),
-            value: json!(false),
-        }];
+        let last_will = vec![];
         let grave_goods = vec![];
 
         let shutdown = self.subsys.clone();
@@ -96,10 +91,13 @@ impl InstanceManager {
         .await
         .into_diagnostic()?;
 
-        wb.set(last_will_topic, &true).into_diagnostic()?;
-
-        wb.psubscribe_unique_async(topic!(ROOT_KEY, "applications", "?", "manifest"))
-            .into_diagnostic()?;
+        wb.subscribe_unique_async(topic!(
+            ROOT_KEY,
+            "applications",
+            self.application,
+            "manifest"
+        ))
+        .into_diagnostic()?;
 
         let mut messages = wb.responses();
 
@@ -120,58 +118,49 @@ impl InstanceManager {
 
     async fn process_message(&mut self, msg: ServerMessage) -> Result<()> {
         match msg {
-            ServerMessage::PState(pstate) => self.update_instances(pstate.event).await?,
+            ServerMessage::State(state) => self.update_instances(state.event).await?,
             ServerMessage::Err(e) => return Err(e).into_diagnostic(),
-            ServerMessage::State(_)
-            | ServerMessage::Ack(_)
-            | ServerMessage::LsState(_)
-            | ServerMessage::Handshake(_) => (/* ignore */),
+            _ => (/* ignore */),
         }
 
         Ok(())
     }
 
-    async fn update_instances(&mut self, pstate: PStateEvent) -> Result<()> {
-        match pstate {
-            PStateEvent::KeyValuePairs(kvps) => self.spawn_or_update_instances(kvps).await?,
-            PStateEvent::Deleted(kvps) => self.stop_instances(kvps).await?,
+    async fn update_instances(&mut self, state: StateEvent) -> Result<()> {
+        match state {
+            StateEvent::KeyValue(kvp) => self.spawn_or_update_instance(kvp).await?,
+            StateEvent::Deleted(kvp) => self.stop_instance(&kvp.key).await?,
         }
 
         Ok(())
     }
 
-    async fn spawn_or_update_instances(&mut self, kvps: Vec<KeyValuePair>) -> Result<()> {
-        for KeyValuePair { key, value } in kvps {
-            match serde_json::from_value::<ApplicationManifest>(value) {
-                Ok(manifest) => {
-                    if let Some(true) = manifest.disabled {
-                        self.stop_instance(&key).await?;
-                    } else {
-                        if self.instances.contains_key(&key) {
-                            self.stop_instance(&key).await?;
-                        }
-                        self.spawn_instance(key, manifest).await?;
-                    }
-                }
-                Err(e) => {
-                    log::warn!("could not parse application manifest for '{}': {}", key, e);
+    async fn spawn_or_update_instance(
+        &mut self,
+        KeyValuePair { key, value }: KeyValuePair,
+    ) -> Result<()> {
+        match serde_json::from_value::<ApplicationManifest>(value) {
+            Ok(manifest) => {
+                if let Some(true) = manifest.disabled {
                     self.stop_instance(&key).await?;
+                } else {
+                    if self.instances.contains_key(&key) {
+                        self.stop_instance(&key).await?;
+                    }
+                    self.spawn_instance(key, manifest).await?;
                 }
+            }
+            Err(e) => {
+                log::warn!("could not parse application manifest for '{}': {}", key, e);
+                self.stop_instance(&key).await?;
             }
         }
         Ok(())
     }
 
-    async fn stop_instances(&mut self, kvps: Vec<KeyValuePair>) -> Result<()> {
-        for KeyValuePair { key, value: _ } in kvps {
-            self.stop_instance(&key).await?;
-        }
-        Ok(())
-    }
-
-    async fn stop_instance(&mut self, application: &str) -> Result<()> {
-        if let Some(instance) = self.instances.remove(application) {
-            log::info!("Stopping instance for application '{application}'");
+    async fn stop_instance(&mut self, key: &str) -> Result<()> {
+        if let Some(instance) = self.instances.remove(key) {
+            log::info!("Stopping instance for application '{key}'");
             self.subsys.perform_partial_shutdown(instance).await?;
         }
 
@@ -202,6 +191,7 @@ impl InstanceManager {
 
 pub async fn run(
     subsys: SubsystemHandle,
+    application: String,
     proto: String,
     host_addr: String,
     port: u16,
@@ -211,6 +201,7 @@ pub async fn run(
     let instances = HashMap::new();
 
     InstanceManager {
+        application,
         host_addr,
         instances,
         proto,

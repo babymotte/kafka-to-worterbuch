@@ -172,7 +172,7 @@ pub async fn run(
 
     log::info!("Starting '{application}' …");
 
-    let last_will_topic = topic!(ROOT_KEY, "status", "running", application);
+    let last_will_topic = topic!(ROOT_KEY, "applications", application, "status", "running");
 
     let last_will = vec![KeyValuePair {
         key: last_will_topic.clone(),
