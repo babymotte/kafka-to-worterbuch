@@ -8,16 +8,16 @@ use tokio_graceful_shutdown::SubsystemHandle;
 
 pub struct K2WbContext {
     subsys: SubsystemHandle,
-    rebalance_tx: mpsc::UnboundedSender<()>,
+    post_rebalance: mpsc::UnboundedSender<()>,
 }
 
 impl ClientContext for K2WbContext {}
 
 impl K2WbContext {
-    pub fn new(subsys: SubsystemHandle, rebalance_tx: mpsc::UnboundedSender<()>) -> Self {
+    pub fn new(subsys: SubsystemHandle, post_rebalance: mpsc::UnboundedSender<()>) -> Self {
         K2WbContext {
             subsys,
-            rebalance_tx,
+            post_rebalance,
         }
     }
 }
@@ -25,24 +25,20 @@ impl K2WbContext {
 impl ConsumerContext for K2WbContext {
     fn pre_rebalance(&self, rebalance: &Rebalance) {
         match rebalance {
-            Rebalance::Assign(ass) => {
-                log::info!(
-                    "Starting rebalance; assigned: {:?}",
-                    ass.to_topic_map()
-                        .keys()
-                        .map(|(topic, part)| format!("{topic}-{part}"))
-                        .collect::<Vec<String>>()
-                )
-            }
-            Rebalance::Revoke(rev) => {
-                log::info!(
-                    "Starting rebalance; assignment revoked: {:?}",
-                    rev.to_topic_map()
-                        .keys()
-                        .map(|(topic, part)| format!("{topic}-{part}"))
-                        .collect::<Vec<String>>()
-                )
-            }
+            Rebalance::Assign(ass) => log::info!(
+                "Starting rebalance; assigned: {:?}",
+                ass.to_topic_map()
+                    .keys()
+                    .map(|(topic, part)| format!("{topic}-{part}"))
+                    .collect::<Vec<String>>()
+            ),
+            Rebalance::Revoke(rev) => log::info!(
+                "Starting rebalance; assignment revoked: {:?}",
+                rev.to_topic_map()
+                    .keys()
+                    .map(|(topic, part)| format!("{topic}-{part}"))
+                    .collect::<Vec<String>>()
+            ),
             Rebalance::Error(err) => {
                 log::error!("Rebalance error: {err}");
                 self.subsys.request_global_shutdown();
@@ -60,20 +56,17 @@ impl ConsumerContext for K2WbContext {
                         .map(|(topic, part)| format!("{topic}-{part}"))
                         .collect::<Vec<String>>()
                 );
-                if let Err(e) = self.rebalance_tx.send(()) {
-                    log::error!("Could not notify client of assigned partitions: {e}");
-                    self.subsys.request_global_shutdown();
-                }
+                // this can only fail if the main loop has already stopped
+                // no need to request a shutdown anymore
+                self.post_rebalance.send(()).ok();
             }
-            Rebalance::Revoke(rev) => {
-                log::info!(
-                    "Rebalance complete; assignment revoked: {:?}",
-                    rev.to_topic_map()
-                        .keys()
-                        .map(|(topic, part)| format!("{topic}-{part}"))
-                        .collect::<Vec<String>>()
-                )
-            }
+            Rebalance::Revoke(rev) => log::info!(
+                "Rebalance complete; assignment revoked: {:?}",
+                rev.to_topic_map()
+                    .keys()
+                    .map(|(topic, part)| format!("{topic}-{part}"))
+                    .collect::<Vec<String>>()
+            ),
             Rebalance::Error(err) => {
                 log::error!("Rebalance error: {err}");
                 self.subsys.request_global_shutdown();

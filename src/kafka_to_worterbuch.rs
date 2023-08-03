@@ -2,6 +2,7 @@ use crate::{
     client::{K2WbConsumer, K2WbContext},
     filter::{Action, TopicFilter},
     instance_manager::{ApplicationManifest, Topic},
+    perf::PerformanceData,
     transcoder::{self, Transcoder},
     ROOT_KEY,
 };
@@ -12,7 +13,7 @@ use rdkafka::{
 };
 use serde_json::{json, Value};
 use std::{collections::HashMap, time::Duration};
-use tokio::{select, sync::mpsc};
+use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
 use worterbuch_client::{topic, Connection, KeyValuePair};
 
@@ -32,9 +33,8 @@ impl KafkaToWorterbuch {
         let group_id = format!("kafka-to-worterbuch-{}", self.application);
         let bootstrap_servers = self.manifest.bootstrap_servers.join(",");
 
-        let (rebalance_tx, mut rebalance_rx) = mpsc::unbounded_channel();
-
-        let context = K2WbContext::new(self.subsys.clone(), rebalance_tx);
+        let (post_rebalance_tx, mut post_rebalance_rx) = mpsc::unbounded_channel();
+        let context = K2WbContext::new(self.subsys.clone(), post_rebalance_tx);
 
         let consumer: K2WbConsumer = ClientConfig::new()
             .set("group.id", group_id)
@@ -58,13 +58,19 @@ impl KafkaToWorterbuch {
 
         let transcoder = transcoder::transcoder_for(&self.manifest)?;
 
+        let mut performance_data = PerformanceData::default();
+
         loop {
             select! {
                 recv = consumer.recv() => match recv {
-                    Ok(msg) => self.process_kafka_message(msg, &transcoder).await?,
+                    Ok(msg) => {
+                        self.process_kafka_message(msg, &transcoder).await?;
+                        self.track_performance(1, &mut performance_data).await?;
+                    },
                     Err(e) => return Err(e).into_diagnostic(),
                 },
-                _ = rebalance_rx.recv() => self.seek_to_stored_offsets(&consumer).await?,
+                _ = post_rebalance_rx.recv() => self.seek_to_stored_offsets(&consumer).await?,
+                _ = sleep(Duration::from_secs(1)) => self.track_performance(0, &mut performance_data).await?,
                 _ = self.subsys.on_shutdown_requested() => break,
             }
         }
@@ -116,6 +122,10 @@ impl KafkaToWorterbuch {
     async fn seek_to_stored_offsets(&mut self, consumer: &K2WbConsumer) -> Result<()> {
         log::info!("Seeking to stored offsets …");
 
+        // make sure assignment has completed
+        // message can be discarded since we will seek to correct offset afterwards anyway
+        consumer.recv().await.into_diagnostic()?;
+
         let mut assignment = consumer.assignment().into_diagnostic()?;
         let assigned_partitions: Vec<(String, i32)> = assignment
             .clone()
@@ -126,6 +136,7 @@ impl KafkaToWorterbuch {
 
         for (topic, partition) in assigned_partitions {
             let offset = self.fetch_stored_offset(&topic, partition).await;
+            log::info!("Seeking  {topic}-{partition}: {offset:?}");
             assignment
                 .set_partition_offset(&topic, partition, offset)
                 .into_diagnostic()?;
@@ -144,6 +155,57 @@ impl KafkaToWorterbuch {
             .ok()
             .map(|o| Offset::Offset(o + 1))
             .unwrap_or(Offset::Beginning)
+    }
+
+    async fn track_performance(
+        &mut self,
+        msg_count: u64,
+        performance_data: &mut PerformanceData,
+    ) -> Result<()> {
+        if let Some(data) = performance_data.update(msg_count) {
+            self.publish_performance_data(data).await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_performance_data(&mut self, (mps, mpm, mph): (u64, u64, u64)) -> Result<()> {
+        self.wb
+            .set(
+                topic!(
+                    ROOT_KEY,
+                    "applications",
+                    self.application,
+                    "status",
+                    "messagesPerSecond"
+                ),
+                &mps,
+            )
+            .into_diagnostic()?;
+        self.wb
+            .set(
+                topic!(
+                    ROOT_KEY,
+                    "applications",
+                    self.application,
+                    "status",
+                    "messagesPerMinute"
+                ),
+                &mpm,
+            )
+            .into_diagnostic()?;
+        self.wb
+            .set(
+                topic!(
+                    ROOT_KEY,
+                    "applications",
+                    self.application,
+                    "status",
+                    "messagesPerHour"
+                ),
+                &mph,
+            )
+            .into_diagnostic()?;
+        Ok(())
     }
 }
 
@@ -172,12 +234,26 @@ pub async fn run(
 
     log::info!("Starting '{application}' …");
 
-    let last_will_topic = topic!(ROOT_KEY, "applications", application, "status", "running");
+    let last_will_running_topic =
+        topic!(ROOT_KEY, "applications", application, "status", "running");
+    let last_will_msg_rate_topic = topic!(
+        ROOT_KEY,
+        "applications",
+        application,
+        "status",
+        "messagesPerSecond"
+    );
 
-    let last_will = vec![KeyValuePair {
-        key: last_will_topic.clone(),
-        value: json!(false),
-    }];
+    let last_will = vec![
+        KeyValuePair {
+            key: last_will_running_topic.clone(),
+            value: json!(false),
+        },
+        KeyValuePair {
+            key: last_will_msg_rate_topic.clone(),
+            value: json!(0),
+        },
+    ];
     let grave_goods = vec![];
 
     let shutdown = subsys.clone();
@@ -196,7 +272,7 @@ pub async fn run(
     .await
     .into_diagnostic()?;
 
-    wb.set(last_will_topic, &true).into_diagnostic()?;
+    wb.set(last_will_running_topic, &true).into_diagnostic()?;
 
     let stopped_application = application.clone();
     let topic_filters = build_topic_filters(&mut manifest);
