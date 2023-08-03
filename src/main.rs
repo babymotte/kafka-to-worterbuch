@@ -3,6 +3,7 @@ mod command_line;
 mod filter;
 mod instance_manager;
 mod kafka_to_worterbuch;
+mod perf;
 mod transcoder;
 
 use miette::{miette, Result};

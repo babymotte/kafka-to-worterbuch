@@ -2,6 +2,7 @@ use crate::{
     client::{K2WbConsumer, K2WbContext},
     filter::{Action, TopicFilter},
     instance_manager::{ApplicationManifest, Topic},
+    perf::PerformanceData,
     transcoder::{self, Transcoder},
     ROOT_KEY,
 };
@@ -11,10 +12,7 @@ use rdkafka::{
     Offset,
 };
 use serde_json::{json, Value};
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, time::Duration};
 use tokio::{select, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
 use worterbuch_client::{topic, Connection, KeyValuePair};
@@ -62,19 +60,18 @@ impl KafkaToWorterbuch {
 
         let transcoder = transcoder::transcoder_for(&self.manifest)?;
 
-        let mut message_rate = (Instant::now(), 0);
+        let mut performance_data = PerformanceData::default();
 
         loop {
             select! {
                 recv = consumer.recv() => match recv {
                     Ok(msg) => {
                         self.process_kafka_message(msg, &transcoder).await?;
-                        message_rate.1 += 1;
-                        message_rate = self.track_message_rate(message_rate).await?;
+                        self.track_performance(1, &mut performance_data).await?;
                     },
                     Err(e) => return Err(e).into_diagnostic(),
                 },
-                _ = sleep(Duration::from_secs(1)) => message_rate = self.track_message_rate(message_rate).await?,
+                _ = sleep(Duration::from_secs(1)) => self.track_performance(0, &mut performance_data).await?,
                 _ = self.subsys.on_shutdown_requested() => break,
             }
         }
@@ -156,26 +153,55 @@ impl KafkaToWorterbuch {
             .unwrap_or(Offset::Beginning)
     }
 
-    async fn track_message_rate(&mut self, message_rate: (Instant, u64)) -> Result<(Instant, u64)> {
-        let elapsed = message_rate.0.elapsed().as_secs_f32();
-        if elapsed > 1.0 {
-            let rate = (message_rate.1 as f32 / elapsed) as usize;
-            self.wb
-                .set(
-                    topic!(
-                        ROOT_KEY,
-                        "applications",
-                        self.application,
-                        "status",
-                        "messagesPerSecond"
-                    ),
-                    &rate,
-                )
-                .into_diagnostic()?;
-            Ok((Instant::now(), 0))
-        } else {
-            Ok(message_rate)
+    async fn track_performance(
+        &mut self,
+        msg_count: u64,
+        performance_data: &mut PerformanceData,
+    ) -> Result<()> {
+        if let Some(data) = performance_data.update(msg_count) {
+            self.publish_performance_data(data).await?;
         }
+        Ok(())
+    }
+
+    async fn publish_performance_data(&mut self, (mps, mpm, mph): (u64, u64, u64)) -> Result<()> {
+        self.wb
+            .set(
+                topic!(
+                    ROOT_KEY,
+                    "applications",
+                    self.application,
+                    "status",
+                    "messagesPerSecond"
+                ),
+                &mps,
+            )
+            .into_diagnostic()?;
+        self.wb
+            .set(
+                topic!(
+                    ROOT_KEY,
+                    "applications",
+                    self.application,
+                    "status",
+                    "messagesPerMinute"
+                ),
+                &mpm,
+            )
+            .into_diagnostic()?;
+        self.wb
+            .set(
+                topic!(
+                    ROOT_KEY,
+                    "applications",
+                    self.application,
+                    "status",
+                    "messagesPerHour"
+                ),
+                &mph,
+            )
+            .into_diagnostic()?;
+        Ok(())
     }
 }
 
