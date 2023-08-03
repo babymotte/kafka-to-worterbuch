@@ -15,7 +15,7 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
-use tokio::{select, sync::mpsc, time::sleep};
+use tokio::{select, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
 use worterbuch_client::{topic, Connection, KeyValuePair};
 
@@ -35,9 +35,7 @@ impl KafkaToWorterbuch {
         let group_id = format!("kafka-to-worterbuch-{}", self.application);
         let bootstrap_servers = self.manifest.bootstrap_servers.join(",");
 
-        let (rebalance_tx, mut rebalance_rx) = mpsc::unbounded_channel();
-
-        let context = K2WbContext::new(self.subsys.clone(), rebalance_tx);
+        let context = K2WbContext::new(self.subsys.clone());
 
         let consumer: K2WbConsumer = ClientConfig::new()
             .set("group.id", group_id)
@@ -59,6 +57,9 @@ impl KafkaToWorterbuch {
         consumer.subscribe(&topics).into_diagnostic()?;
         log::info!("Subscription done. Waiting for rebalance …");
 
+        consumer.recv().await.into_diagnostic()?;
+        self.seek_to_stored_offsets(&consumer).await?;
+
         let transcoder = transcoder::transcoder_for(&self.manifest)?;
 
         let mut message_rate = (Instant::now(), 0);
@@ -73,7 +74,6 @@ impl KafkaToWorterbuch {
                     },
                     Err(e) => return Err(e).into_diagnostic(),
                 },
-                _ = rebalance_rx.recv() => self.seek_to_stored_offsets(&consumer).await?,
                 _ = sleep(Duration::from_secs(1)) => message_rate = self.track_message_rate(message_rate).await?,
                 _ = self.subsys.on_shutdown_requested() => break,
             }
@@ -204,12 +204,26 @@ pub async fn run(
 
     log::info!("Starting '{application}' …");
 
-    let last_will_topic = topic!(ROOT_KEY, "applications", application, "status", "running");
+    let last_will_running_topic =
+        topic!(ROOT_KEY, "applications", application, "status", "running");
+    let last_will_msg_rate_topic = topic!(
+        ROOT_KEY,
+        "applications",
+        application,
+        "status",
+        "messagesPerSecond"
+    );
 
-    let last_will = vec![KeyValuePair {
-        key: last_will_topic.clone(),
-        value: json!(false),
-    }];
+    let last_will = vec![
+        KeyValuePair {
+            key: last_will_running_topic.clone(),
+            value: json!(false),
+        },
+        KeyValuePair {
+            key: last_will_msg_rate_topic.clone(),
+            value: json!(0),
+        },
+    ];
     let grave_goods = vec![];
 
     let shutdown = subsys.clone();
@@ -228,7 +242,7 @@ pub async fn run(
     .await
     .into_diagnostic()?;
 
-    wb.set(last_will_topic, &true).into_diagnostic()?;
+    wb.set(last_will_running_topic, &true).into_diagnostic()?;
 
     let stopped_application = application.clone();
     let topic_filters = build_topic_filters(&mut manifest);

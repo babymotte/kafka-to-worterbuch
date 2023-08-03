@@ -3,22 +3,17 @@ use rdkafka::{
     error::KafkaResult,
     ClientContext, TopicPartitionList,
 };
-use tokio::sync::mpsc;
 use tokio_graceful_shutdown::SubsystemHandle;
 
 pub struct K2WbContext {
     subsys: SubsystemHandle,
-    rebalance_tx: mpsc::UnboundedSender<()>,
 }
 
 impl ClientContext for K2WbContext {}
 
 impl K2WbContext {
-    pub fn new(subsys: SubsystemHandle, rebalance_tx: mpsc::UnboundedSender<()>) -> Self {
-        K2WbContext {
-            subsys,
-            rebalance_tx,
-        }
+    pub fn new(subsys: SubsystemHandle) -> Self {
+        K2WbContext { subsys }
     }
 }
 
@@ -60,10 +55,6 @@ impl ConsumerContext for K2WbContext {
                         .map(|(topic, part)| format!("{topic}-{part}"))
                         .collect::<Vec<String>>()
                 );
-                if let Err(e) = self.rebalance_tx.send(()) {
-                    log::error!("Could not notify client of assigned partitions: {e}");
-                    self.subsys.request_global_shutdown();
-                }
             }
             Rebalance::Revoke(rev) => {
                 log::info!(
