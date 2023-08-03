@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-to-worterbuch"
-version = "1.0.0"
+version = "0.9.0"
 dependencies = [
  "apache-avro 0.15.0",
  "async-trait",

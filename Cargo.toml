@@ -1,6 +1,6 @@
 [package]
 name = "kafka-to-worterbuch"
-version = "1.0.0"
+version = "0.9.0"
 authors = ["Michael Bachmann <mbachmann@bbmsoft.net>"]
 edition = "2021"
 description = "Dump kafka topics into a Wörterbuch"
