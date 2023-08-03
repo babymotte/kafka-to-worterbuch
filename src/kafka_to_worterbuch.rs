@@ -13,7 +13,7 @@ use rdkafka::{
 };
 use serde_json::{json, Value};
 use std::{collections::HashMap, time::Duration};
-use tokio::{select, time::sleep};
+use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
 use worterbuch_client::{topic, Connection, KeyValuePair};
 
@@ -33,7 +33,8 @@ impl KafkaToWorterbuch {
         let group_id = format!("kafka-to-worterbuch-{}", self.application);
         let bootstrap_servers = self.manifest.bootstrap_servers.join(",");
 
-        let context = K2WbContext::new(self.subsys.clone());
+        let (post_rebalance_tx, mut post_rebalance_rx) = mpsc::unbounded_channel();
+        let context = K2WbContext::new(self.subsys.clone(), post_rebalance_tx);
 
         let consumer: K2WbConsumer = ClientConfig::new()
             .set("group.id", group_id)
@@ -55,9 +56,6 @@ impl KafkaToWorterbuch {
         consumer.subscribe(&topics).into_diagnostic()?;
         log::info!("Subscription done. Waiting for rebalance …");
 
-        consumer.recv().await.into_diagnostic()?;
-        self.seek_to_stored_offsets(&consumer).await?;
-
         let transcoder = transcoder::transcoder_for(&self.manifest)?;
 
         let mut performance_data = PerformanceData::default();
@@ -71,6 +69,7 @@ impl KafkaToWorterbuch {
                     },
                     Err(e) => return Err(e).into_diagnostic(),
                 },
+                _ = post_rebalance_rx.recv() => self.seek_to_stored_offsets(&consumer).await?,
                 _ = sleep(Duration::from_secs(1)) => self.track_performance(0, &mut performance_data).await?,
                 _ = self.subsys.on_shutdown_requested() => break,
             }
@@ -123,6 +122,10 @@ impl KafkaToWorterbuch {
     async fn seek_to_stored_offsets(&mut self, consumer: &K2WbConsumer) -> Result<()> {
         log::info!("Seeking to stored offsets …");
 
+        // make sure assignment has completed
+        // message can be discarded since we will seek to correct offset afterwards anyway
+        consumer.recv().await.into_diagnostic()?;
+
         let mut assignment = consumer.assignment().into_diagnostic()?;
         let assigned_partitions: Vec<(String, i32)> = assignment
             .clone()
@@ -133,6 +136,7 @@ impl KafkaToWorterbuch {
 
         for (topic, partition) in assigned_partitions {
             let offset = self.fetch_stored_offset(&topic, partition).await;
+            log::info!("Seeking  {topic}-{partition}: {offset:?}");
             assignment
                 .set_partition_offset(&topic, partition, offset)
                 .into_diagnostic()?;
