@@ -11,8 +11,11 @@ use rdkafka::{
     Offset,
 };
 use serde_json::{json, Value};
-use std::{collections::HashMap, time::Duration};
-use tokio::{select, sync::mpsc};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
 use worterbuch_client::{topic, Connection, KeyValuePair};
 
@@ -58,13 +61,20 @@ impl KafkaToWorterbuch {
 
         let transcoder = transcoder::transcoder_for(&self.manifest)?;
 
+        let mut message_rate = (Instant::now(), 0);
+
         loop {
             select! {
                 recv = consumer.recv() => match recv {
-                    Ok(msg) => self.process_kafka_message(msg, &transcoder).await?,
+                    Ok(msg) => {
+                        self.process_kafka_message(msg, &transcoder).await?;
+                        message_rate.1 += 1;
+                        message_rate = self.track_message_rate(message_rate).await?;
+                    },
                     Err(e) => return Err(e).into_diagnostic(),
                 },
                 _ = rebalance_rx.recv() => self.seek_to_stored_offsets(&consumer).await?,
+                _ = sleep(Duration::from_secs(1)) => message_rate = self.track_message_rate(message_rate).await?,
                 _ = self.subsys.on_shutdown_requested() => break,
             }
         }
@@ -144,6 +154,28 @@ impl KafkaToWorterbuch {
             .ok()
             .map(|o| Offset::Offset(o + 1))
             .unwrap_or(Offset::Beginning)
+    }
+
+    async fn track_message_rate(&mut self, message_rate: (Instant, u64)) -> Result<(Instant, u64)> {
+        let elapsed = message_rate.0.elapsed().as_secs_f32();
+        if elapsed > 1.0 {
+            let rate = (message_rate.1 as f32 / elapsed) as usize;
+            self.wb
+                .set(
+                    topic!(
+                        ROOT_KEY,
+                        "applications",
+                        self.application,
+                        "status",
+                        "messagesPerSecond"
+                    ),
+                    &rate,
+                )
+                .into_diagnostic()?;
+            Ok((Instant::now(), 0))
+        } else {
+            Ok(message_rate)
+        }
     }
 }
 
