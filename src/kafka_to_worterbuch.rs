@@ -12,7 +12,7 @@ use rdkafka::{
     Offset,
 };
 use serde_json::{json, Value};
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, ops::ControlFlow, time::Duration};
 use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
 use worterbuch_client::{topic, KeyValuePair, Worterbuch};
@@ -75,7 +75,9 @@ impl KafkaToWorterbuch {
                     },
                     Err(e) => return Err(e).into_diagnostic(),
                 },
-                _ = post_rebalance_rx.recv() => self.seek_to_stored_offsets(&consumer).await?,
+                _ = post_rebalance_rx.recv() => if let ControlFlow::Break(_) = self.seek_to_stored_offsets(&consumer).await? {
+                    break;
+                },
                 _ = sleep(Duration::from_secs(1)) => self.track_performance(0, &mut performance_data).await?,
                 _ = self.subsys.on_shutdown_requested() => break,
             }
@@ -136,12 +138,15 @@ impl KafkaToWorterbuch {
         Ok(())
     }
 
-    async fn seek_to_stored_offsets(&mut self, consumer: &K2WbConsumer) -> Result<()> {
+    async fn seek_to_stored_offsets(&mut self, consumer: &K2WbConsumer) -> Result<ControlFlow<()>> {
         log::info!("Seeking to stored offsets …");
 
         // make sure assignment has completed
         // message can be discarded since we will seek to correct offset afterwards anyway
-        consumer.recv().await.into_diagnostic()?;
+        select! {
+            recv = consumer.recv() => {  recv.into_diagnostic()?; },
+            _ = self.subsys.on_shutdown_requested() => return Ok(ControlFlow::Break(())),
+        }
 
         let mut assignment = consumer.assignment().into_diagnostic()?;
         let assigned_partitions: Vec<(String, i32)> = assignment
@@ -162,7 +167,7 @@ impl KafkaToWorterbuch {
 
         log::info!("Done. Ready to forward messages.");
 
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 
     async fn fetch_stored_offset(&mut self, topic: &str, partition: i32) -> Result<Offset> {
