@@ -758,6 +758,7 @@ dependencies = [
  "tokio-graceful-shutdown",
  "url",
  "worterbuch-client",
+ "worterbuch-common",
 ]
 
 [[package]]
@@ -2007,8 +2008,6 @@ dependencies = [
 [[package]]
 name = "worterbuch-client"
 version = "0.36.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be8c2587d520b78dd4e5317568d966adde95121009dc2f1729fac06d8059eaea"
 dependencies = [
  "async-stream",
  "futures-core",
@@ -2024,8 +2023,6 @@ dependencies = [
 [[package]]
 name = "worterbuch-common"
 version = "0.36.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67d3cbc93adf2fd46a8c1a270c69bd0776573e07aa260af3205f7588942728fe"
 dependencies = [
  "serde",
  "serde_json",

@@ -4,11 +4,10 @@ use crate::{
 };
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tokio::select;
 use tokio_graceful_shutdown::{NestedSubsystem, SubsystemHandle};
 use url::Url;
-use worterbuch_client::{topic, KeyValuePair, ServerMessage, StateEvent};
+use worterbuch_client::topic;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Encoding {
@@ -63,7 +62,7 @@ fn default_encoding() -> Encoding {
 
 struct InstanceManager {
     application: String,
-    instances: HashMap<String, NestedSubsystem>,
+    instance: Option<NestedSubsystem>,
     subsys: SubsystemHandle,
     proto: String,
     host_addr: String,
@@ -91,100 +90,73 @@ impl InstanceManager {
         .await
         .into_diagnostic()?;
 
-        wb.subscribe_unique_async(topic!(
-            ROOT_KEY,
-            "applications",
-            self.application,
-            "manifest"
-        ))
-        .into_diagnostic()?;
-
-        let mut messages = wb.responses();
+        let (mut manifests, _) = wb
+            .subscribe_unique(topic!(
+                ROOT_KEY,
+                "applications",
+                self.application,
+                "manifest"
+            ))
+            .await
+            .into_diagnostic()?;
 
         loop {
             select! {
-                recv = messages.recv() => match recv {
-                    Ok(msg) => self.process_message(msg).await?,
-                    Err(e) => return Err(e).into_diagnostic(),
+                recv = manifests.recv() => match recv {
+                    Some(msg) => self.process_message(msg).await?,
+                    None => self.subsys.request_global_shutdown(),
                 },
                 _ = self.subsys.on_shutdown_requested() => break,
             }
         }
 
-        wb.close().await;
+        wb.close().await.into_diagnostic()?;
 
         Ok(())
     }
 
-    async fn process_message(&mut self, msg: ServerMessage) -> Result<()> {
+    async fn process_message(&mut self, msg: Option<ApplicationManifest>) -> Result<()> {
         match msg {
-            ServerMessage::State(state) => self.update_instances(state.event).await?,
-            ServerMessage::Err(e) => return Err(e).into_diagnostic(),
-            _ => (/* ignore */),
+            Some(manifest) => self.spawn_or_update_instance(manifest).await?,
+            None => self.stop_instance().await?,
         }
 
         Ok(())
     }
 
-    async fn update_instances(&mut self, state: StateEvent) -> Result<()> {
-        match state {
-            StateEvent::KeyValue(kvp) => self.spawn_or_update_instance(kvp).await?,
-            StateEvent::Deleted(kvp) => self.stop_instance(&kvp.key).await?,
-        }
-
-        Ok(())
-    }
-
-    async fn spawn_or_update_instance(
-        &mut self,
-        KeyValuePair { key, value }: KeyValuePair,
-    ) -> Result<()> {
-        match serde_json::from_value::<ApplicationManifest>(value) {
-            Ok(manifest) => {
-                if let Some(true) = manifest.disabled {
-                    self.stop_instance(&key).await?;
-                } else {
-                    if self.instances.contains_key(&key) {
-                        self.stop_instance(&key).await?;
-                    }
-                    self.spawn_instance(key, manifest).await?;
-                }
-            }
-            Err(e) => {
-                log::warn!("could not parse application manifest for '{}': {}", key, e);
-                self.stop_instance(&key).await?;
-            }
+    async fn spawn_or_update_instance(&mut self, manifest: ApplicationManifest) -> Result<()> {
+        self.stop_instance().await?;
+        match manifest.disabled {
+            None | Some(false) => self.spawn_instance(manifest).await?,
+            _ => (),
         }
         Ok(())
     }
 
-    async fn stop_instance(&mut self, key: &str) -> Result<()> {
-        if let Some(instance) = self.instances.remove(key) {
-            log::info!("Stopping instance for application '{key}'");
+    async fn stop_instance(&mut self) -> Result<()> {
+        if let Some(instance) = self.instance.take() {
+            log::info!("Stopping instance for application '{}'", self.application);
             self.subsys.perform_partial_shutdown(instance).await?;
         }
 
         Ok(())
     }
 
-    async fn spawn_instance(
-        &mut self,
-        application: String,
-        manifest: ApplicationManifest,
-    ) -> Result<()> {
-        log::info!("Spawning instance for application '{application}'");
-
-        let instance_name = application.clone();
+    async fn spawn_instance(&mut self, manifest: ApplicationManifest) -> Result<()> {
+        log::info!("Spawning instance for application '{}'", self.application);
 
         let proto = self.proto.to_owned();
         let host_addr = self.host_addr.to_owned();
         let port = self.port;
 
-        let instance = self.subsys.start(&instance_name, move |subsys| {
+        let application = self.application.clone();
+
+        let instance = self.subsys.start(&self.application, move |subsys| {
             kafka_to_worterbuch::run(subsys, application, manifest, proto, host_addr, port)
         });
 
-        self.instances.insert(instance_name, instance);
+        self.instance = Some(instance);
+
         Ok(())
     }
 }
@@ -198,12 +170,12 @@ pub async fn run(
 ) -> Result<()> {
     log::info!("Starting instance manager …");
 
-    let instances = HashMap::new();
+    let instance = None;
 
     InstanceManager {
         application,
         host_addr,
-        instances,
+        instance,
         proto,
         port,
         subsys,

@@ -1,4 +1,5 @@
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
+use worterbuch_common::TransactionId;
 
 #[derive(Debug)]
 pub struct PerformanceData {
@@ -9,6 +10,7 @@ pub struct PerformanceData {
     msg_per_hour: [u64; 60],
     last_measurement_second: Instant,
     last_measurement_minute: Instant,
+    in_flight_messages: HashSet<TransactionId>,
 }
 
 impl Default for PerformanceData {
@@ -21,12 +23,13 @@ impl Default for PerformanceData {
             msg_per_hour: [0; 60],
             last_measurement_second: Instant::now(),
             last_measurement_minute: Instant::now(),
+            in_flight_messages: HashSet::new(),
         }
     }
 }
 
 impl PerformanceData {
-    pub fn update(&mut self, msg_count: u64) -> Option<(u64, u64, u64)> {
+    pub fn update(&mut self, msg_count: u64) -> Option<(u64, u64, u64, usize)> {
         self.message_counter += msg_count;
         let elapsed = self.last_measurement_second.elapsed().as_secs_f32() as f64;
         if elapsed > 1.0 {
@@ -50,10 +53,25 @@ impl PerformanceData {
 
             self.message_counter = 0;
 
-            Some((msg_per_second, msg_per_minute, msg_per_hour))
+            let in_fligh_messages = self.in_flight_messages.len();
+
+            Some((
+                msg_per_second,
+                msg_per_minute,
+                msg_per_hour,
+                in_fligh_messages,
+            ))
         } else {
             None
         }
+    }
+
+    pub fn message_queued(&mut self, transaction_id: TransactionId) {
+        self.in_flight_messages.insert(transaction_id);
+    }
+
+    pub fn message_acked(&mut self, transaction_id: TransactionId) {
+        self.in_flight_messages.remove(&transaction_id);
     }
 
     fn inc_cursor(&self, cursor: usize) -> usize {

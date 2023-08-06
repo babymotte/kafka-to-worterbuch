@@ -15,12 +15,13 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, time::Duration};
 use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
-use worterbuch_client::{topic, Connection, KeyValuePair};
+use worterbuch_client::{topic, KeyValuePair, Worterbuch};
+use worterbuch_common::TransactionId;
 
 const TO: Duration = Duration::from_secs(5);
 
 struct KafkaToWorterbuch {
-    wb: Connection,
+    wb: Worterbuch,
     subsys: SubsystemHandle,
     manifest: ApplicationManifest,
     application: String,
@@ -60,11 +61,16 @@ impl KafkaToWorterbuch {
 
         let mut performance_data = PerformanceData::default();
 
+        let mut acks = self.wb.acks().await.into_diagnostic()?;
+
         loop {
             select! {
+                Some(transaction_id) = acks.recv() => performance_data.message_acked(transaction_id),
                 recv = consumer.recv() => match recv {
                     Ok(msg) => {
-                        self.process_kafka_message(msg, &transcoder).await?;
+                        if let Some(transaction_id) = self.process_kafka_message(msg, &transcoder).await? {
+                            performance_data.message_queued(transaction_id);
+                        }
                         self.track_performance(1, &mut performance_data).await?;
                     },
                     Err(e) => return Err(e).into_diagnostic(),
@@ -75,6 +81,8 @@ impl KafkaToWorterbuch {
             }
         }
 
+        self.wb.close().await.into_diagnostic()?;
+
         Ok(())
     }
 
@@ -82,40 +90,49 @@ impl KafkaToWorterbuch {
         &mut self,
         message: BorrowedMessage<'_>,
         transcoder: &impl Transcoder,
-    ) -> Result<()> {
+    ) -> Result<Option<TransactionId>> {
         match transcoder.transcode(&message).await {
-            Ok(value) => self.forward_transcoded_message(message, value)?,
-            Err(e) => log::error!("Error decoding kafka message: {e}"),
+            Ok(value) => self.forward_transcoded_message(message, value).await,
+            Err(e) => {
+                log::error!("Error decoding kafka message: {e}");
+                Ok(None)
+            }
         }
-
-        Ok(())
     }
 
-    fn forward_transcoded_message(
+    async fn forward_transcoded_message(
         &mut self,
         message: BorrowedMessage<'_>,
         value: Value,
-    ) -> Result<()> {
+    ) -> Result<Option<TransactionId>> {
         let msg_key = decode_key(&message);
         let topic = message.topic();
         let topic_filter = self.topic_filters.get(topic);
 
         let key = topic!(self.application, topic, msg_key);
-        match topic_filter.and_then(|f| f.apply(&value)) {
-            Some(Action::Delete) => self.wb.delete_async(key),
-            Some(Action::Publish) => self.wb.publish(key, &value),
-            _ => self.wb.set(key, &value),
-        }
-        .into_diagnostic()?;
+        let transaction_id = match topic_filter.and_then(|f| f.apply(&value)) {
+            Some(Action::Delete) => Some(self.wb.delete_generic(key).await.into_diagnostic()?.1),
+            Some(Action::Publish) => Some(
+                self.wb
+                    .publish_generic(key, value)
+                    .await
+                    .into_diagnostic()?,
+            ),
+            Some(Action::Set) => Some(self.wb.set_generic(key, value).await.into_diagnostic()?),
+            None => None,
+        };
 
-        self.store_offset(message)?;
+        self.store_offset(message).await?;
 
-        Ok(())
+        Ok(transaction_id)
     }
 
-    fn store_offset(&mut self, message: BorrowedMessage<'_>) -> Result<()> {
+    async fn store_offset(&mut self, message: BorrowedMessage<'_>) -> Result<()> {
         let key = topic!(self.offsets_key, message.topic(), message.partition());
-        self.wb.set(key, &message.offset()).into_diagnostic()?;
+        self.wb
+            .set(key, &message.offset())
+            .await
+            .into_diagnostic()?;
         Ok(())
     }
 
@@ -135,7 +152,7 @@ impl KafkaToWorterbuch {
             .collect();
 
         for (topic, partition) in assigned_partitions {
-            let offset = self.fetch_stored_offset(&topic, partition).await;
+            let offset = self.fetch_stored_offset(&topic, partition).await?;
             log::info!("Seeking  {topic}-{partition}: {offset:?}");
             assignment
                 .set_partition_offset(&topic, partition, offset)
@@ -148,13 +165,20 @@ impl KafkaToWorterbuch {
         Ok(())
     }
 
-    async fn fetch_stored_offset(&mut self, topic: &str, partition: i32) -> Offset {
-        self.wb
+    async fn fetch_stored_offset(&mut self, topic: &str, partition: i32) -> Result<Offset> {
+        log::debug!("Fetching offset for partition {topic}-{partition} …");
+        let offset = self
+            .wb
             .get::<i64>(topic!(self.offsets_key, topic, partition))
             .await
-            .ok()
+            .into_diagnostic()?
+            .0;
+        log::debug!("Got offset from worterbuch: {offset:?}");
+        let offset = offset
             .map(|o| Offset::Offset(o + 1))
-            .unwrap_or(Offset::Beginning)
+            .unwrap_or(Offset::Beginning);
+        log::debug!("Using offset {offset:?}.");
+        Ok(offset)
     }
 
     async fn track_performance(
@@ -168,7 +192,10 @@ impl KafkaToWorterbuch {
         Ok(())
     }
 
-    async fn publish_performance_data(&mut self, (mps, mpm, mph): (u64, u64, u64)) -> Result<()> {
+    async fn publish_performance_data(
+        &mut self,
+        (mps, mpm, mph, inflght): (u64, u64, u64, usize),
+    ) -> Result<()> {
         self.wb
             .set(
                 topic!(
@@ -180,6 +207,7 @@ impl KafkaToWorterbuch {
                 ),
                 &mps,
             )
+            .await
             .into_diagnostic()?;
         self.wb
             .set(
@@ -192,6 +220,7 @@ impl KafkaToWorterbuch {
                 ),
                 &mpm,
             )
+            .await
             .into_diagnostic()?;
         self.wb
             .set(
@@ -204,6 +233,20 @@ impl KafkaToWorterbuch {
                 ),
                 &mph,
             )
+            .await
+            .into_diagnostic()?;
+        self.wb
+            .set(
+                topic!(
+                    ROOT_KEY,
+                    "applications",
+                    self.application,
+                    "status",
+                    "inFlightMessages"
+                ),
+                &inflght,
+            )
+            .await
             .into_diagnostic()?;
         Ok(())
     }
@@ -272,7 +315,9 @@ pub async fn run(
     .await
     .into_diagnostic()?;
 
-    wb.set(last_will_running_topic, &true).into_diagnostic()?;
+    wb.set(last_will_running_topic, &true)
+        .await
+        .into_diagnostic()?;
 
     let stopped_application = application.clone();
     let topic_filters = build_topic_filters(&mut manifest);
@@ -282,6 +327,7 @@ pub async fn run(
         manifest,
         subsys,
         wb,
+        // messages,
         application,
         topic_filters,
         offsets_key,
