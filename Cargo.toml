@@ -24,7 +24,6 @@ tokio-graceful-shutdown = "0.13.0"
 clap = { version = "4.3.19", features = ["derive"] }
 rdkafka = { version = "0.33.2", features = ["cmake-build"] }
 worterbuch-client = { path = "../worterbuch/worterbuch-client" }
-worterbuch-common = { path = "../worterbuch/worterbuch-common" }
 serde_json = "1.0.104"
 url = { version = "2.4.0", features = ["serde"] }
 serde = { version = "1.0.180", features = ["derive"] }

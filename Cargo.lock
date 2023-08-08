@@ -758,7 +758,6 @@ dependencies = [
  "tokio-graceful-shutdown",
  "url",
  "worterbuch-client",
- "worterbuch-common",
 ]
 
 [[package]]

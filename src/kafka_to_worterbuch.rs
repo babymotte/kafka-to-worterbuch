@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, ops::ControlFlow, time::Duration};
 use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
-use worterbuch_client::{topic, KeyValuePair, TransactionId, Worterbuch};
+use worterbuch_client::{topic, Ack, KeyValuePair, ServerMessage, TransactionId, Worterbuch};
 
 const TO: Duration = Duration::from_secs(5);
 
@@ -60,11 +60,11 @@ impl KafkaToWorterbuch {
 
         let mut performance_data = PerformanceData::default();
 
-        let mut acks = self.wb.acks().await.into_diagnostic()?;
+        let mut acks = self.wb.all_messages().await.into_diagnostic()?;
 
         loop {
             select! {
-                Some(transaction_id) = acks.recv() => performance_data.message_acked(transaction_id),
+                Some(ServerMessage::Ack(Ack{transaction_id})) = acks.recv() => performance_data.message_acked(transaction_id),
                 recv = consumer.recv() => match recv {
                     Ok(msg) => {
                         if let Some(transaction_id) = self.process_kafka_message(msg, &transcoder).await? {
