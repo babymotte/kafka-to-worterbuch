@@ -95,10 +95,13 @@ impl KafkaToWorterbuch {
     ) -> Result<Option<TransactionId>> {
         match transcoder.transcode(&message).await {
             Ok(value) => self.forward_transcoded_message(message, value).await,
-            Err(e) => {
-                log::error!("Error decoding kafka message: {e}");
-                Ok(None)
-            }
+            Err(e) => log::error!(
+                "Error decoding kafka message with offset {} from partition {}-{} : {}",
+                message.offset(),
+                message.topic(),
+                message.partition(),
+                e
+            ),
         }
     }
 
