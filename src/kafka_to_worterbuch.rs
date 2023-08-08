@@ -135,7 +135,7 @@ impl KafkaToWorterbuch {
     async fn store_offset(&mut self, message: BorrowedMessage<'_>) -> Result<()> {
         let key = topic!(self.offsets_key, message.topic(), message.partition());
         self.wb
-            .set(key, &message.offset())
+            .set(key, &(message.offset() + 1))
             .await
             .into_diagnostic()?;
         Ok(())
@@ -160,7 +160,9 @@ impl KafkaToWorterbuch {
             .collect();
 
         for (topic, partition) in assigned_partitions {
-            let offset = self.fetch_stored_offset(&topic, partition).await?;
+            let offset = self
+                .fetch_stored_offset(&topic, partition, consumer)
+                .await?;
             log::info!("Seeking  {topic}-{partition}: {offset:?}");
             assignment
                 .set_partition_offset(&topic, partition, offset)
@@ -173,9 +175,16 @@ impl KafkaToWorterbuch {
         Ok(ControlFlow::Continue(()))
     }
 
-    async fn fetch_stored_offset(&mut self, topic: &str, partition: i32) -> Result<Offset> {
-        log::debug!("Fetching offset for partition {topic}-{partition} …");
-        let offset = self
+    async fn fetch_stored_offset(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        consumer: &K2WbConsumer,
+    ) -> Result<Offset> {
+        let (low_watermark, high_watermark) = consumer
+            .fetch_watermarks(&topic, partition, TO)
+            .into_diagnostic()?;
+        Ok(self
             .wb
             .get::<i64>(topic!(self.offsets_key, topic, partition))
             .await
@@ -183,7 +192,7 @@ impl KafkaToWorterbuch {
             .0;
         log::debug!("Got offset from worterbuch: {offset:?}");
         let offset = offset
-            .map(|o| Offset::Offset(o + 1))
+            .map(|o| Offset::Offset(o.max(low_watermark).min(high_watermark)))
             .unwrap_or(Offset::Beginning);
         log::debug!("Using offset {offset:?}.");
         Ok(offset)
@@ -335,7 +344,6 @@ pub async fn run(
         manifest,
         subsys,
         wb,
-        // messages,
         application,
         topic_filters,
         offsets_key,
