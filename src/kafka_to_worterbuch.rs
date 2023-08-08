@@ -12,11 +12,10 @@ use rdkafka::{
     Offset,
 };
 use serde_json::{json, Value};
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, ops::ControlFlow, time::Duration};
 use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
-use worterbuch_client::{topic, KeyValuePair, Worterbuch};
-use worterbuch_common::TransactionId;
+use worterbuch_client::{topic, KeyValuePair, TransactionId, Worterbuch};
 
 const TO: Duration = Duration::from_secs(5);
 
@@ -75,7 +74,9 @@ impl KafkaToWorterbuch {
                     },
                     Err(e) => return Err(e).into_diagnostic(),
                 },
-                _ = post_rebalance_rx.recv() => self.seek_to_stored_offsets(&consumer).await?,
+                _ = post_rebalance_rx.recv() => if let ControlFlow::Break(_) = self.seek_to_stored_offsets(&consumer).await? {
+                    break;
+                },
                 _ = sleep(Duration::from_secs(1)) => self.track_performance(0, &mut performance_data).await?,
                 _ = self.subsys.on_shutdown_requested() => break,
             }
@@ -94,7 +95,13 @@ impl KafkaToWorterbuch {
         match transcoder.transcode(&message).await {
             Ok(value) => self.forward_transcoded_message(message, value).await,
             Err(e) => {
-                log::error!("Error decoding kafka message: {e}");
+                log::error!(
+                    "Error decoding kafka message with offset {} of partition {}-{} : {}",
+                    message.offset(),
+                    message.topic(),
+                    message.partition(),
+                    e
+                );
                 Ok(None)
             }
         }
@@ -130,18 +137,21 @@ impl KafkaToWorterbuch {
     async fn store_offset(&mut self, message: BorrowedMessage<'_>) -> Result<()> {
         let key = topic!(self.offsets_key, message.topic(), message.partition());
         self.wb
-            .set(key, &message.offset())
+            .set(key, &(message.offset() + 1))
             .await
             .into_diagnostic()?;
         Ok(())
     }
 
-    async fn seek_to_stored_offsets(&mut self, consumer: &K2WbConsumer) -> Result<()> {
+    async fn seek_to_stored_offsets(&mut self, consumer: &K2WbConsumer) -> Result<ControlFlow<()>> {
         log::info!("Seeking to stored offsets …");
 
         // make sure assignment has completed
         // message can be discarded since we will seek to correct offset afterwards anyway
-        consumer.recv().await.into_diagnostic()?;
+        select! {
+            recv = consumer.recv() => {  recv.into_diagnostic()?; },
+            _ = self.subsys.on_shutdown_requested() => return Ok(ControlFlow::Break(())),
+        }
 
         let mut assignment = consumer.assignment().into_diagnostic()?;
         let assigned_partitions: Vec<(String, i32)> = assignment
@@ -152,7 +162,9 @@ impl KafkaToWorterbuch {
             .collect();
 
         for (topic, partition) in assigned_partitions {
-            let offset = self.fetch_stored_offset(&topic, partition).await?;
+            let offset = self
+                .fetch_stored_offset(&topic, partition, consumer)
+                .await?;
             log::info!("Seeking  {topic}-{partition}: {offset:?}");
             assignment
                 .set_partition_offset(&topic, partition, offset)
@@ -162,11 +174,18 @@ impl KafkaToWorterbuch {
 
         log::info!("Done. Ready to forward messages.");
 
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 
-    async fn fetch_stored_offset(&mut self, topic: &str, partition: i32) -> Result<Offset> {
-        log::debug!("Fetching offset for partition {topic}-{partition} …");
+    async fn fetch_stored_offset(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        consumer: &K2WbConsumer,
+    ) -> Result<Offset> {
+        let (low_watermark, high_watermark) = consumer
+            .fetch_watermarks(&topic, partition, TO)
+            .into_diagnostic()?;
         let offset = self
             .wb
             .get::<i64>(topic!(self.offsets_key, topic, partition))
@@ -175,7 +194,7 @@ impl KafkaToWorterbuch {
             .0;
         log::debug!("Got offset from worterbuch: {offset:?}");
         let offset = offset
-            .map(|o| Offset::Offset(o + 1))
+            .map(|o| Offset::Offset(o.max(low_watermark).min(high_watermark)))
             .unwrap_or(Offset::Beginning);
         log::debug!("Using offset {offset:?}.");
         Ok(offset)
@@ -327,7 +346,6 @@ pub async fn run(
         manifest,
         subsys,
         wb,
-        // messages,
         application,
         topic_filters,
         offsets_key,
