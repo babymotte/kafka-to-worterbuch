@@ -96,7 +96,7 @@ impl KafkaToWorterbuch {
         match transcoder.transcode(&message).await {
             Ok(value) => self.forward_transcoded_message(message, value).await,
             Err(e) => log::error!(
-                "Error decoding kafka message with offset {} from partition {}-{} : {}",
+                "Error decoding kafka message with offset {} of partition {}-{} : {}",
                 message.offset(),
                 message.topic(),
                 message.partition(),
