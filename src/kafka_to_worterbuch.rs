@@ -15,8 +15,7 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, ops::ControlFlow, time::Duration};
 use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
-use worterbuch_client::{topic, KeyValuePair, Worterbuch};
-use worterbuch_common::TransactionId;
+use worterbuch_client::{topic, KeyValuePair, TransactionId, Worterbuch};
 
 const TO: Duration = Duration::from_secs(5);
 
@@ -95,13 +94,16 @@ impl KafkaToWorterbuch {
     ) -> Result<Option<TransactionId>> {
         match transcoder.transcode(&message).await {
             Ok(value) => self.forward_transcoded_message(message, value).await,
-            Err(e) => log::error!(
-                "Error decoding kafka message with offset {} of partition {}-{} : {}",
-                message.offset(),
-                message.topic(),
-                message.partition(),
-                e
-            ),
+            Err(e) => {
+                log::error!(
+                    "Error decoding kafka message with offset {} of partition {}-{} : {}",
+                    message.offset(),
+                    message.topic(),
+                    message.partition(),
+                    e
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -184,7 +186,7 @@ impl KafkaToWorterbuch {
         let (low_watermark, high_watermark) = consumer
             .fetch_watermarks(&topic, partition, TO)
             .into_diagnostic()?;
-        Ok(self
+        let offset = self
             .wb
             .get::<i64>(topic!(self.offsets_key, topic, partition))
             .await

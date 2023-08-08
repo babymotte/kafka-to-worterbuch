@@ -1,5 +1,5 @@
 use std::{collections::HashSet, time::Instant};
-use worterbuch_common::TransactionId;
+use worterbuch_client::TransactionId;
 
 #[derive(Debug)]
 pub struct PerformanceData {
