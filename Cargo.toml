@@ -9,6 +9,12 @@ license = "MIT"
 keywords = ["worterbuch", "kafka", "connector", "state", "store"]
 categories = ["database-implementations", "web-programming", "caching"]
 
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [dependencies]
 miette = { version = "5.10.0", features = ["fancy"] }
 env_logger = "0.10.0"
