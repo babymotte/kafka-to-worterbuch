@@ -47,7 +47,7 @@ jobs:
           override: true
 
       - name: Build
-        run: cargo build --all --release
+        run: cargo build --release
 
       - name: Package Binaries
         uses: vimtor/action-zip@v1

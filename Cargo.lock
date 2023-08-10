@@ -2006,7 +2006,9 @@ dependencies = [
 
 [[package]]
 name = "worterbuch-client"
-version = "0.36.1"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04bfb6fcbf02c8bd85606e8b7ae96e7a24c3384214d29159ad0215a08dc6430a"
 dependencies = [
  "async-stream",
  "futures-core",
@@ -2021,7 +2023,9 @@ dependencies = [
 
 [[package]]
 name = "worterbuch-common"
-version = "0.36.1"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b9574ad95b37c220ac96fdae344122b1c174878592baf50132de0f36e5440b0"
 dependencies = [
  "serde",
  "serde_json",

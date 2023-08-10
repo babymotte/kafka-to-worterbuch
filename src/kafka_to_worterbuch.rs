@@ -62,6 +62,10 @@ impl KafkaToWorterbuch {
 
         let mut acks = self.wb.all_messages().await.into_diagnostic()?;
 
+        // TODO build state of out-of-sync topics locally:
+        // get high watermark and build state locally until high watermark is reached for that topic,
+        // only then publish compacted state to wb and keep publishing from there
+
         loop {
             select! {
                 Some(ServerMessage::Ack(Ack{transaction_id})) = acks.recv() => performance_data.message_acked(transaction_id),
@@ -186,6 +190,7 @@ impl KafkaToWorterbuch {
         let (low_watermark, high_watermark) = consumer
             .fetch_watermarks(&topic, partition, TO)
             .into_diagnostic()?;
+        // TODO fall back to low watermark when out of range; required for building state locally
         let offset = self
             .wb
             .get::<i64>(topic!(self.offsets_key, topic, partition))
