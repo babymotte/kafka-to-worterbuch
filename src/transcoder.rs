@@ -5,7 +5,6 @@ use self::{
 use crate::instance_manager::{ApplicationManifest, Encoding};
 use async_trait::async_trait;
 use miette::Result;
-use rdkafka::message::BorrowedMessage;
 use serde_json::Value;
 
 mod avro;
@@ -15,7 +14,7 @@ mod protobuf;
 
 #[async_trait]
 pub trait Transcoder {
-    async fn transcode(&self, message: &BorrowedMessage<'_>) -> Result<Value>;
+    async fn transcode(&self, message_payload: Option<Vec<u8>>) -> Result<Value>;
 }
 
 pub enum TranscoderImpl<'a> {
@@ -27,12 +26,12 @@ pub enum TranscoderImpl<'a> {
 
 #[async_trait]
 impl<'a> Transcoder for TranscoderImpl<'a> {
-    async fn transcode(&self, message: &BorrowedMessage<'_>) -> Result<Value> {
+    async fn transcode(&self, message_payload: Option<Vec<u8>>) -> Result<Value> {
         match self {
-            TranscoderImpl::Avro(transcoder) => transcoder.transcode(message).await,
-            TranscoderImpl::Json(transcoder) => transcoder.transcode(message).await,
-            TranscoderImpl::Protobuf(transcoder) => transcoder.transcode(message).await,
-            TranscoderImpl::PlainText(transcoder) => transcoder.transcode(message).await,
+            TranscoderImpl::Avro(transcoder) => transcoder.transcode(message_payload).await,
+            TranscoderImpl::Json(transcoder) => transcoder.transcode(message_payload).await,
+            TranscoderImpl::Protobuf(transcoder) => transcoder.transcode(message_payload).await,
+            TranscoderImpl::PlainText(transcoder) => transcoder.transcode(message_payload).await,
         }
     }
 }

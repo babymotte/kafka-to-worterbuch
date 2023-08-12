@@ -1,3 +1,5 @@
+mod accumulator;
+mod async_kafka;
 mod client;
 mod command_line;
 mod filter;

@@ -66,14 +66,6 @@ impl PerformanceData {
         }
     }
 
-    pub fn message_queued(&mut self, transaction_id: TransactionId) {
-        self.in_flight_messages.insert(transaction_id);
-    }
-
-    pub fn message_acked(&mut self, transaction_id: TransactionId) {
-        self.in_flight_messages.remove(&transaction_id);
-    }
-
     fn inc_cursor(&self, cursor: usize) -> usize {
         if cursor < 59 {
             cursor + 1

@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use miette::miette;
-use rdkafka::message::BorrowedMessage;
 
 use super::Transcoder;
 
@@ -9,7 +8,10 @@ pub struct JsonTranscoder;
 
 #[async_trait]
 impl Transcoder for JsonTranscoder {
-    async fn transcode(&self, _message: &BorrowedMessage<'_>) -> miette::Result<serde_json::Value> {
+    async fn transcode(
+        &self,
+        _message_payload: Option<Vec<u8>>,
+    ) -> miette::Result<serde_json::Value> {
         Err(miette!("json transocder not yet implemented"))
     }
 }

@@ -1,7 +1,6 @@
 use super::Transcoder;
 use async_trait::async_trait;
 use miette::{miette, IntoDiagnostic, Result};
-use rdkafka::{message::BorrowedMessage, Message};
 use schema_registry_converter::async_impl::{avro::AvroDecoder, schema_registry::SrSettings};
 use url::Url;
 
@@ -26,10 +25,13 @@ impl<'a> AvroTranscoder<'a> {
 
 #[async_trait]
 impl<'a> Transcoder for AvroTranscoder<'a> {
-    async fn transcode(&self, message: &BorrowedMessage<'_>) -> miette::Result<serde_json::Value> {
+    async fn transcode(
+        &self,
+        message_payload: Option<Vec<u8>>,
+    ) -> miette::Result<serde_json::Value> {
         let decoded = self
             .decoder
-            .decode(message.payload())
+            .decode(message_payload.as_deref())
             .await
             .into_diagnostic()?;
         decoded.value.try_into().into_diagnostic()

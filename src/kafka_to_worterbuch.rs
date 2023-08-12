@@ -1,4 +1,6 @@
 use crate::{
+    accumulator::StateAccumulator,
+    async_kafka::AsyncKafka,
     client::{K2WbConsumer, K2WbContext},
     filter::{Action, TopicFilter},
     instance_manager::{ApplicationManifest, Topic},
@@ -15,7 +17,7 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, ops::ControlFlow, time::Duration};
 use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
-use worterbuch_client::{topic, Ack, KeyValuePair, ServerMessage, TransactionId, Worterbuch};
+use worterbuch_client::{topic, Key, KeyValuePair, TransactionId, Worterbuch};
 
 const TO: Duration = Duration::from_secs(5);
 
@@ -36,6 +38,7 @@ impl KafkaToWorterbuch {
         let (post_rebalance_tx, mut post_rebalance_rx) = mpsc::unbounded_channel();
         let context = K2WbContext::new(self.subsys.clone(), post_rebalance_tx);
 
+        let async_consumer = AsyncKafka::new(group_id.clone(), bootstrap_servers.clone());
         let consumer: K2WbConsumer = ClientConfig::new()
             .set("group.id", group_id)
             .set("bootstrap.servers", bootstrap_servers)
@@ -60,29 +63,35 @@ impl KafkaToWorterbuch {
 
         let mut performance_data = PerformanceData::default();
 
-        let mut acks = self.wb.all_messages().await.into_diagnostic()?;
-
-        // TODO build state of out-of-sync topics locally:
-        // get high watermark and build state locally until high watermark is reached for that topic,
-        // only then publish compacted state to wb and keep publishing from there
+        let (accumulator_tx, mut accumulator_rx) = mpsc::unbounded_channel();
+        let mut accumulator = None;
 
         loop {
             select! {
-                Some(ServerMessage::Ack(Ack{transaction_id})) = acks.recv() => performance_data.message_acked(transaction_id),
+                _ = self.subsys.on_shutdown_requested() => break,
+                _ = post_rebalance_rx.recv() => match self.build_accumulator(&consumer, &async_consumer, &transcoder, accumulator_tx.clone()).await? {
+                    ControlFlow::Continue(acc) => accumulator = Some(acc),
+                    ControlFlow::Break(_) => break,
+                },
+                recv = accumulator_rx.recv() => match recv {
+                    Some((Some((topic, partition, offset)), (key, value))) => {
+                        self.forward_transcoded_message(topic, partition, offset, key, value).await?;
+                    },
+                    Some((None, (key,value))) => {
+                        self.wb.set(key, &value).await.into_diagnostic()?;
+                    },
+                    None => break,
+                },
                 recv = consumer.recv() => match recv {
                     Ok(msg) => {
-                        if let Some(transaction_id) = self.process_kafka_message(msg, &transcoder).await? {
-                            performance_data.message_queued(transaction_id);
+                        if let Some(acc) = &mut accumulator {
+                            self.process_kafka_message(msg, acc).await?;
+                            self.track_performance(1, &mut performance_data).await?;
                         }
-                        self.track_performance(1, &mut performance_data).await?;
                     },
-                    Err(e) => return Err(e).into_diagnostic(),
-                },
-                _ = post_rebalance_rx.recv() => if let ControlFlow::Break(_) = self.seek_to_stored_offsets(&consumer).await? {
-                    break;
+                    Err(e) => Err(e).into_diagnostic()?,
                 },
                 _ = sleep(Duration::from_secs(1)) => self.track_performance(0, &mut performance_data).await?,
-                _ = self.subsys.on_shutdown_requested() => break,
             }
         }
 
@@ -91,36 +100,33 @@ impl KafkaToWorterbuch {
         Ok(())
     }
 
-    async fn process_kafka_message(
+    async fn process_kafka_message<T: Transcoder>(
         &mut self,
         message: BorrowedMessage<'_>,
-        transcoder: &impl Transcoder,
-    ) -> Result<Option<TransactionId>> {
-        match transcoder.transcode(&message).await {
-            Ok(value) => self.forward_transcoded_message(message, value).await,
-            Err(e) => {
-                log::error!(
-                    "Error decoding kafka message with offset {} of partition {}-{} : {}",
-                    message.offset(),
-                    message.topic(),
-                    message.partition(),
-                    e
-                );
-                Ok(None)
-            }
-        }
+        accumulator: &mut StateAccumulator<'_, T>,
+    ) -> Result<()> {
+        let topic = message.topic().to_owned();
+        let partition = message.partition();
+        let key = decode_key(&message);
+        let payload = message.payload().map(ToOwned::to_owned);
+        let offset = message.offset();
+        accumulator
+            .message_arrived(topic, partition, key, payload, offset)
+            .await?;
+
+        Ok(())
     }
 
     async fn forward_transcoded_message(
         &mut self,
-        message: BorrowedMessage<'_>,
+        topic: String,
+        partition: i32,
+        offset: i64,
+        key: Key,
         value: Value,
     ) -> Result<Option<TransactionId>> {
-        let msg_key = decode_key(&message);
-        let topic = message.topic();
-        let topic_filter = self.topic_filters.get(topic);
+        let topic_filter = self.topic_filters.get(&topic);
 
-        let key = topic!(self.application, topic, msg_key);
         let transaction_id = match topic_filter.and_then(|f| f.apply(&value)) {
             Some(Action::Delete) => Some(self.wb.delete_generic(key).await.into_diagnostic()?.1),
             Some(Action::Publish) => Some(
@@ -133,21 +139,24 @@ impl KafkaToWorterbuch {
             None => None,
         };
 
-        self.store_offset(message).await?;
+        self.store_offset(&topic, partition, offset).await?;
 
         Ok(transaction_id)
     }
 
-    async fn store_offset(&mut self, message: BorrowedMessage<'_>) -> Result<()> {
-        let key = topic!(self.offsets_key, message.topic(), message.partition());
-        self.wb
-            .set(key, &(message.offset() + 1))
-            .await
-            .into_diagnostic()?;
+    async fn store_offset(&mut self, topic: &str, partition: i32, offset: i64) -> Result<()> {
+        let key = topic!(self.offsets_key, topic, partition);
+        self.wb.set(key, &(offset + 1)).await.into_diagnostic()?;
         Ok(())
     }
 
-    async fn seek_to_stored_offsets(&mut self, consumer: &K2WbConsumer) -> Result<ControlFlow<()>> {
+    async fn build_accumulator<'a, T: Transcoder>(
+        &mut self,
+        consumer: &K2WbConsumer,
+        async_consumer: &AsyncKafka,
+        transcoder: &'a T,
+        accumulator_tx: mpsc::UnboundedSender<(Option<(String, i32, i64)>, (Key, Value))>,
+    ) -> Result<ControlFlow<(), StateAccumulator<'a, T>>> {
         log::info!("Seeking to stored offsets …");
 
         // make sure assignment has completed
@@ -165,32 +174,43 @@ impl KafkaToWorterbuch {
             .map(|e| (e.topic().to_owned(), e.partition()))
             .collect();
 
-        for (topic, partition) in assigned_partitions {
+        let watermarks = async_consumer.fetch_watermarks(assigned_partitions).await?;
+        let mut watermarks_and_offsets = Vec::new();
+
+        for ((topic, partition), (low_watermark, high_watermark)) in &watermarks {
             let offset = self
-                .fetch_stored_offset(&topic, partition, consumer)
+                .fetch_stored_offset(&topic, *partition, *low_watermark, *high_watermark)
                 .await?;
             log::info!("Seeking  {topic}-{partition}: {offset:?}");
+            watermarks_and_offsets.push((
+                (topic.clone(), *partition),
+                (raw_offset(&offset, low_watermark), *high_watermark),
+            ));
             assignment
-                .set_partition_offset(&topic, partition, offset)
+                .set_partition_offset(&topic, *partition, offset)
                 .into_diagnostic()?;
         }
         consumer.seek_partitions(assignment, TO).into_diagnostic()?;
 
         log::info!("Done. Ready to forward messages.");
 
-        Ok(ControlFlow::Continue(()))
+        let accumulator = StateAccumulator::new(
+            self.application.clone(),
+            transcoder,
+            watermarks_and_offsets,
+            accumulator_tx,
+        )?;
+
+        Ok(ControlFlow::Continue(accumulator))
     }
 
     async fn fetch_stored_offset(
         &mut self,
         topic: &str,
         partition: i32,
-        consumer: &K2WbConsumer,
+        low_watermark: i64,
+        high_watermark: i64,
     ) -> Result<Offset> {
-        let (low_watermark, high_watermark) = consumer
-            .fetch_watermarks(&topic, partition, TO)
-            .into_diagnostic()?;
-        // TODO fall back to low watermark when out of range; required for building state locally
         let offset = self
             .wb
             .get::<i64>(topic!(self.offsets_key, topic, partition))
@@ -303,12 +323,13 @@ pub async fn run(
 
     let last_will_running_topic =
         topic!(ROOT_KEY, "applications", application, "status", "running");
-    let last_will_msg_rate_topic = topic!(
+
+    let last_will_topics_synced = topic!(
         ROOT_KEY,
         "applications",
         application,
         "status",
-        "messagesPerSecond"
+        "allTopicsSynced"
     );
 
     let last_will = vec![
@@ -317,11 +338,11 @@ pub async fn run(
             value: json!(false),
         },
         KeyValuePair {
-            key: last_will_msg_rate_topic.clone(),
-            value: json!(0),
+            key: last_will_topics_synced.clone(),
+            value: json!(false),
         },
     ];
-    let grave_goods = vec![];
+    let grave_goods = vec![topic!(ROOT_KEY, "applications", application, "status", "#")];
 
     let shutdown = subsys.clone();
     let on_disconnect = async move {
@@ -340,6 +361,10 @@ pub async fn run(
     .into_diagnostic()?;
 
     wb.set(last_will_running_topic, &true)
+        .await
+        .into_diagnostic()?;
+
+    wb.set(last_will_topics_synced, &false)
         .await
         .into_diagnostic()?;
 
@@ -373,4 +398,12 @@ fn build_topic_filters(manifest: &mut ApplicationManifest) -> HashMap<String, To
     }
 
     map
+}
+
+fn raw_offset(offset: &Offset, low_watermark: &i64) -> i64 {
+    if let Offset::Offset(offset) = offset {
+        *offset
+    } else {
+        *low_watermark
+    }
 }
