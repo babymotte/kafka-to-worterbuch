@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, ops::ControlFlow, time::Duration};
 use tokio::{select, sync::mpsc, time::sleep};
 use tokio_graceful_shutdown::SubsystemHandle;
-use worterbuch_client::{topic, Key, KeyValuePair, TransactionId, Worterbuch};
+use worterbuch_client::{config::Config, topic, Key, KeyValuePair, TransactionId, Worterbuch};
 
 const TO: Duration = Duration::from_secs(5);
 
@@ -308,9 +308,7 @@ pub async fn run(
     subsys: SubsystemHandle,
     application: String,
     mut manifest: ApplicationManifest,
-    proto: String,
-    host_addr: String,
-    port: u16,
+    wb_config: Config,
 ) -> Result<()> {
     let application = application
         .split('/')
@@ -349,16 +347,9 @@ pub async fn run(
         shutdown.request_global_shutdown();
     };
 
-    let mut wb = worterbuch_client::connect(
-        &proto,
-        &host_addr,
-        port,
-        last_will,
-        grave_goods,
-        on_disconnect,
-    )
-    .await
-    .into_diagnostic()?;
+    let mut wb = worterbuch_client::connect(wb_config, last_will, grave_goods, on_disconnect)
+        .await
+        .into_diagnostic()?;
 
     wb.set(last_will_running_topic, &true)
         .await

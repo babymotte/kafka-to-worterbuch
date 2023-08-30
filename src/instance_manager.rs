@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio_graceful_shutdown::{NestedSubsystem, SubsystemHandle};
 use url::Url;
-use worterbuch_client::topic;
+use worterbuch_client::{config::Config, topic};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Encoding {
@@ -64,9 +64,7 @@ struct InstanceManager {
     application: String,
     instance: Option<NestedSubsystem>,
     subsys: SubsystemHandle,
-    proto: String,
-    host_addr: String,
-    port: u16,
+    wb_config: Config,
 }
 
 impl InstanceManager {
@@ -80,9 +78,7 @@ impl InstanceManager {
         };
 
         let mut wb = worterbuch_client::connect(
-            &self.proto,
-            &self.host_addr,
-            self.port,
+            self.wb_config.clone(),
             last_will,
             grave_goods,
             on_disconnect,
@@ -145,14 +141,12 @@ impl InstanceManager {
     async fn spawn_instance(&mut self, manifest: ApplicationManifest) -> Result<()> {
         log::info!("Spawning instance for application '{}'", self.application);
 
-        let proto = self.proto.to_owned();
-        let host_addr = self.host_addr.to_owned();
-        let port = self.port;
+        let config = self.wb_config.clone();
 
         let application = self.application.clone();
 
         let instance = self.subsys.start(&self.application, move |subsys| {
-            kafka_to_worterbuch::run(subsys, application, manifest, proto, host_addr, port)
+            kafka_to_worterbuch::run(subsys, application, manifest, config)
         });
 
         self.instance = Some(instance);
@@ -161,23 +155,15 @@ impl InstanceManager {
     }
 }
 
-pub async fn run(
-    subsys: SubsystemHandle,
-    application: String,
-    proto: String,
-    host_addr: String,
-    port: u16,
-) -> Result<()> {
+pub async fn run(subsys: SubsystemHandle, application: String, wb_config: Config) -> Result<()> {
     log::info!("Starting instance manager …");
 
     let instance = None;
 
     InstanceManager {
+        wb_config,
         application,
-        host_addr,
         instance,
-        proto,
-        port,
         subsys,
     }
     .run()
