@@ -23,11 +23,11 @@ tokio = { version = "1.30.0", features = ["rt"] }
 tokio-graceful-shutdown = "0.13.0"
 clap = { version = "4.3.21", features = ["derive"] }
 rdkafka = { version = "0.34.0", features = ["cmake-build"] }
-worterbuch-client = "0.38.1"
+worterbuch-client = "0.41.2"
 serde_json = "1.0.104"
 url = { version = "2.4.0", features = ["serde"] }
 serde = { version = "1.0.183", features = ["derive"] }
-apache-avro = "0.15.0"
+apache-avro = "0.16.0"
 schema_registry_converter = { version = "3.1.0", default-features = false, features = [
     "futures",
     "avro",

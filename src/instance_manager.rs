@@ -77,7 +77,7 @@ impl InstanceManager {
             shutdown.request_global_shutdown();
         };
 
-        let mut wb = worterbuch_client::connect(
+        let wb = worterbuch_client::connect(
             self.wb_config.clone(),
             last_will,
             grave_goods,
@@ -87,12 +87,11 @@ impl InstanceManager {
         .into_diagnostic()?;
 
         let (mut manifests, _) = wb
-            .subscribe_unique(topic!(
-                ROOT_KEY,
-                "applications",
-                self.application,
-                "manifest"
-            ))
+            .subscribe(
+                topic!(ROOT_KEY, "applications", self.application, "manifest"),
+                true,
+                false,
+            )
             .await
             .into_diagnostic()?;
 

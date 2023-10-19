@@ -22,9 +22,9 @@ async fn main() -> Result<()> {
     let application = opts.application;
 
     if let (Some(tls), Some(addr), Some(port)) = (opts.tls, opts.address, opts.port) {
-        let proto = (if tls { "wss" } else { "ws" }).to_owned();
-
-        log::info!("Using worterbuch server {proto}://{addr}:{port}/ws");
+        let proto = (if tls { "wss" } else { "tcp" }).to_owned();
+        let path = (if tls { "/ws" } else { "" }).to_owned();
+        log::info!("Using worterbuch server {proto}://{addr}:{port}{path}");
 
         let wb_config = Config::with_address(proto, addr, port);
 

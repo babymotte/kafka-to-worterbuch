@@ -347,7 +347,7 @@ pub async fn run(
         shutdown.request_global_shutdown();
     };
 
-    let mut wb = worterbuch_client::connect(wb_config, last_will, grave_goods, on_disconnect)
+    let wb = worterbuch_client::connect(wb_config, last_will, grave_goods, on_disconnect)
         .await
         .into_diagnostic()?;
 
